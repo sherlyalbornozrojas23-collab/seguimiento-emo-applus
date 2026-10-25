@@ -1,3 +1,15 @@
+        display = view[[
+            "Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador",
+            "Fecha_emision", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento",
+            "Responsable", "Correo", "Archivo", "Hoja", "source_row"
+        ]].rename(columns={"source_row": "Fila origen"})
+        st.dataframe(display, use_container_width=True, hide_index=True)
+
+with tab_export:
+    st.subheader("Informes ejecutivos y base consolidada")
+    if all_records.empty:
+        st.info("Importa al menos una hoja para habilitar reportes.")
+    else:
         report_filters_1, report_filters_2 = st.columns(2)
         report_cat_options = options_for(all_records, "Categoria")
         report_cat = report_filters_1.selectbox("Filtrar informe por categoría", report_cat_options, key="report_cat")
@@ -103,10 +115,3 @@ st.caption(
     "los permisos, el acceso a la aplicación, la retención de archivos y el almacenamiento. "
     "No cargues diagnósticos ni historias clínicas. Los archivos originales se guardan en data/originales."
 )
-
-st.caption(
-    "Prototipo administrativo. Antes de usar datos reales, valida con TI, SST y el responsable de privacidad "
-    "los permisos, el acceso a la aplicación, la retención de archivos y el almacenamiento. "
-    "No cargues diagnósticos ni historias clínicas. Los archivos originales se guardan en data/originales."
-)# seguimiento-emo-applus
-Sistema de seguimiento de exámenes médicos ocupacionales
