@@ -405,95 +405,203 @@ else:
         "Persona_activo", "Identificador", "Responsable", "Correo", "Archivo", "Hoja"
     ])
 
+def project_expiry_summary(frame, threshold):
+    """Compact summary: counts and percentages are calculated over all rows per project."""
+    if frame.empty:
+        return pd.DataFrame(columns=[
+            "Proyecto", "Total documentos", "Vencidos", "% vencidos",
+            "Vencen hoy", "Próximos a vencer", "% próximos a vencer"
+        ])
+    data = frame.copy()
+    days = pd.to_numeric(data["Dias_restantes"], errors="coerce")
+    data["_vencido"] = days < 0
+    data["_hoy"] = days == 0
+    data["_proximo"] = days.gt(0) & days.le(threshold)
+    summary = data.groupby("Proyecto", dropna=False).agg(
+        **{
+            "Total documentos": ("Proyecto", "size"),
+            "Vencidos": ("_vencido", "sum"),
+            "Vencen hoy": ("_hoy", "sum"),
+            "Próximos a vencer": ("_proximo", "sum"),
+        }
+    ).reset_index()
+    denominator = summary["Total documentos"].replace(0, pd.NA)
+    summary["% vencidos"] = (summary["Vencidos"] / denominator * 100).fillna(0).round(1)
+    summary["% próximos a vencer"] = (summary["Próximos a vencer"] / denominator * 100).fillna(0).round(1)
+    return summary.sort_values(["Vencidos", "Próximos a vencer", "Total documentos"], ascending=False).reset_index(drop=True)
+
+
+def build_filtered_excel(detail, summary, today):
+    """Create a clean Excel workbook with a project summary and only the filtered base."""
+    output = BytesIO()
+    detail_cols = [
+        "Proyecto", "Categoria", "Tipo_control", "Persona_activo", "Identificador",
+        "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento", "Responsable", "Correo"
+    ]
+    available_cols = [col for col in detail_cols if col in detail.columns]
+    detail_export = detail[available_cols].copy().rename(columns={
+        "Categoria": "Categoría", "Tipo_control": "Tipo de control",
+        "Persona_activo": "Persona / activo", "Identificador": "Código / placa",
+        "Fecha_vencimiento": "Fecha de vencimiento", "Dias_restantes": "Días restantes",
+        "Estado_seguimiento": "Estado", "Responsable": "Responsable", "Correo": "Correo"
+    })
+    summary_export = summary.rename(columns={
+        "Proyecto": "Proyecto", "Total documentos": "Total documentos",
+        "Vencidos": "Vencidos", "% vencidos": "% vencidos",
+        "Vencen hoy": "Vencen hoy", "Próximos a vencer": "Próximos a vencer",
+        "% próximos a vencer": "% próximos a vencer"
+    }).copy()
+    with pd.ExcelWriter(output, engine="openpyxl", date_format="DD/MM/YYYY", datetime_format="DD/MM/YYYY") as writer:
+        summary_export.to_excel(writer, index=False, sheet_name="Resumen por proyecto")
+        detail_export.to_excel(writer, index=False, sheet_name="Base filtrada")
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.chart import BarChart, Reference
+        wb = writer.book
+        for ws in wb.worksheets:
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            ws.sheet_view.showGridLines = False
+            for cell in ws[1]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="174A7E")
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws.row_dimensions[1].height = 30
+            for col_cells in ws.columns:
+                letter = col_cells[0].column_letter
+                max_len = max((len(str(c.value or "")) for c in col_cells[:200]), default=10)
+                ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 34)
+        summary_ws = wb["Resumen por proyecto"]
+        for row in range(2, summary_ws.max_row + 1):
+            summary_ws.cell(row, 4).number_format = '0.0"%"'
+            summary_ws.cell(row, 7).number_format = '0.0"%"'
+        detail_ws = wb["Base filtrada"]
+        for col_idx, header in enumerate([c.value for c in detail_ws[1]], start=1):
+            if header == "Fecha de vencimiento":
+                for row in range(2, detail_ws.max_row + 1):
+                    detail_ws.cell(row, col_idx).number_format = "DD/MM/YYYY"
+        if summary_ws.max_row > 1:
+            chart = BarChart()
+            chart.type = "bar"
+            chart.style = 10
+            chart.title = "Vencidos y próximos a vencer por proyecto"
+            chart.y_axis.title = "Proyecto"
+            chart.x_axis.title = "Cantidad de documentos"
+            chart.height = max(7, min(14, summary_ws.max_row * 0.35))
+            chart.width = 18
+            # Columns C and F are the two action counts in the summary.
+            data = Reference(summary_ws, min_col=3, max_col=3, min_row=1, max_row=summary_ws.max_row)
+            cats = Reference(summary_ws, min_col=1, min_row=2, max_row=summary_ws.max_row)
+            chart.add_data(data, titles_from_data=True)
+            chart.set_categories(cats)
+            chart2 = BarChart()
+            chart2.type = "bar"
+            chart2.style = 11
+            chart2.title = "Próximos a vencer por proyecto"
+            chart2.y_axis.title = "Proyecto"
+            chart2.x_axis.title = "Cantidad"
+            chart2.height = chart.height
+            chart2.width = 18
+            data2 = Reference(summary_ws, min_col=6, max_col=6, min_row=1, max_row=summary_ws.max_row)
+            chart2.add_data(data2, titles_from_data=True)
+            chart2.set_categories(cats)
+            summary_ws.add_chart(chart, "I2")
+            summary_ws.add_chart(chart2, "I20")
+    return output.getvalue()
+
+
 with tab_dashboard:
-    st.subheader("Resumen corporativo interactivo")
+    st.subheader("Vencimientos por proyecto")
     if all_records.empty:
         st.info("Aún no hay registros consolidados. Entra en «Cargar Excel» para importar la primera base.")
     else:
-        total = len(all_records)
-        expired = int((all_records["Dias_restantes"].apply(lambda x: pd.notna(x) and x < 0)).sum())
-        today_count = int((all_records["Dias_restantes"] == 0).sum())
-        soon = int((all_records["Dias_restantes"].apply(lambda x: pd.notna(x) and 0 < x <= max(warning_days or [30]))).sum())
-        unknown = int(all_records["Fecha_vencimiento"].isna().sum())
-        a, b, c, d, e = st.columns(5)
-        a.metric("Registros", total)
-        b.metric("Vencidos", expired, delta=None)
-        c.metric("Vencen hoy", today_count)
-        d.metric("Próximos a vencer", soon)
-        e.metric("Fecha por revisar", unknown)
-
-        st.markdown("#### Filtros del panel")
-        fc1, fc2, fc3 = st.columns(3)
+        threshold = max(warning_days or [30])
+        st.caption(f"Próximos a vencer: documentos que vencen dentro de los próximos {threshold} días. Los porcentajes se calculan sobre el total de registros de cada proyecto.")
+        fc1, fc2 = st.columns(2)
         dash_categories = options_for(all_records, "Categoria")
         dash_category = fc1.selectbox("Categoría", dash_categories, key="dash_category")
         dash_projects = options_for(all_records, "Proyecto")
-        dash_project = fc2.selectbox("Proyecto / área", dash_projects, key="dash_project")
-        dash_statuses = ["Todos"] + sorted(all_records["Estado_seguimiento"].dropna().astype(str).unique().tolist())
-        dash_status = fc3.selectbox("Estado", dash_statuses, key="dash_status")
+        dash_project = fc2.selectbox("Proyecto", dash_projects, key="dash_project")
 
         dash = all_records.copy()
         if dash_category != "Todos":
             dash = dash[dash["Categoria"].astype(str) == dash_category]
         if dash_project != "Todos":
             dash = dash[dash["Proyecto"].astype(str) == dash_project]
-        if dash_status != "Todos":
-            dash = dash[dash["Estado_seguimiento"].astype(str) == dash_status]
 
         if dash.empty:
             st.warning("No hay registros para los filtros seleccionados.")
         else:
-            chart1, chart2 = st.columns(2)
-            with chart1:
-                st.markdown("#### Registros por categoría")
-                by_category = dash.groupby("Categoria", dropna=False).size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
-                fig_cat = px.bar(by_category, x="Categoria", y="Cantidad", text="Cantidad", color="Categoria", title="Volumen por categoría", hover_data={"Cantidad": True})
-                fig_cat.update_layout(showlegend=False, xaxis_title="Categoría", yaxis_title="Cantidad", xaxis_tickangle=-25, height=390)
-                fig_cat.update_traces(textposition="outside")
-                st.plotly_chart(fig_cat, use_container_width=True, key="chart_category")
-            with chart2:
-                st.markdown("#### Estado de los vencimientos")
-                by_status = dash.groupby("Estado_seguimiento", dropna=False).size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
-                fig_status = px.bar(by_status, x="Estado_seguimiento", y="Cantidad", text="Cantidad", color="Estado_seguimiento", title="Registros por estado", hover_data={"Cantidad": True})
-                fig_status.update_layout(xaxis_title="Estado", yaxis_title="Cantidad", xaxis_tickangle=-25, height=390)
-                fig_status.update_traces(textposition="outside")
-                st.plotly_chart(fig_status, use_container_width=True, key="chart_status")
+            summary = project_expiry_summary(dash, threshold)
+            total_docs = int(summary["Total documentos"].sum())
+            expired_total = int(summary["Vencidos"].sum())
+            soon_total = int(summary["Próximos a vencer"].sum())
+            due_today_total = int(summary["Vencen hoy"].sum())
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Documentos filtrados", total_docs)
+            m2.metric("Vencidos", expired_total, f"{(expired_total / total_docs * 100 if total_docs else 0):.1f}% del total")
+            m3.metric("Próximos a vencer", soon_total, f"{(soon_total / total_docs * 100 if total_docs else 0):.1f}% del total")
+            m4.metric("Vencen hoy", due_today_total)
 
-            chart3, chart4 = st.columns(2)
-            with chart3:
-                st.markdown("#### Vencimientos por proyecto / área")
-                by_project = dash.groupby("Proyecto", dropna=False).size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False).head(15)
-                fig_project = px.bar(by_project, x="Proyecto", y="Cantidad", text="Cantidad", color="Cantidad", title="Top 15 proyectos por volumen", hover_data={"Cantidad": True})
-                fig_project.update_layout(xaxis_title="Proyecto / área", yaxis_title="Cantidad", xaxis_tickangle=-30, height=390, coloraxis_showscale=False)
-                fig_project.update_traces(textposition="outside")
-                st.plotly_chart(fig_project, use_container_width=True, key="chart_project")
-            with chart4:
-                st.markdown("#### Distribución por plazo")
-                def bucket(days):
-                    if pd.isna(days): return "Fecha por revisar"
-                    if days < 0: return "Vencidos"
-                    if days == 0: return "Vence hoy"
-                    if days <= 7: return "1–7 días"
-                    if days <= 15: return "8–15 días"
-                    if days <= 30: return "16–30 días"
-                    if days <= 60: return "31–60 días"
-                    return "Más de 60 días"
-                bucket_order = ["Vencidos", "Vence hoy", "1–7 días", "8–15 días", "16–30 días", "31–60 días", "Más de 60 días", "Fecha por revisar"]
-                plazo = dash.copy()
-                plazo["Plazo"] = plazo["Dias_restantes"].apply(bucket)
-                by_due = plazo.groupby("Plazo").size().reindex(bucket_order, fill_value=0).reset_index(name="Cantidad")
-                by_due = by_due[by_due["Cantidad"] > 0]
-                fig_due = px.bar(by_due, x="Plazo", y="Cantidad", text="Cantidad", color="Plazo", title="Anticipación de los vencimientos", category_orders={"Plazo": bucket_order}, hover_data={"Cantidad": True})
-                fig_due.update_layout(xaxis_title="Plazo", yaxis_title="Cantidad", xaxis_tickangle=-25, height=390, showlegend=False)
-                fig_due.update_traces(textposition="outside")
-                st.plotly_chart(fig_due, use_container_width=True, key="chart_due")
+            chart_data = summary.melt(
+                id_vars="Proyecto", value_vars=["Vencidos", "Próximos a vencer"],
+                var_name="Estado", value_name="Cantidad"
+            )
+            fig_project = px.bar(
+                chart_data, y="Proyecto", x="Cantidad", color="Estado", barmode="group",
+                text="Cantidad", orientation="h", title="Cantidad de vencidos y próximos a vencer por proyecto",
+                hover_data={"Cantidad": True, "Proyecto": True, "Estado": True}
+            )
+            fig_project.update_layout(height=max(330, min(650, 38 * len(summary) + 130)), xaxis_title="Cantidad de documentos", yaxis_title="", legend_title="", margin=dict(l=10, r=20, t=60, b=20))
+            fig_project.update_traces(textposition="outside", cliponaxis=False)
+            st.plotly_chart(fig_project, use_container_width=True, key="chart_project_expiry_summary")
 
-            st.markdown("#### Base filtrada de vencimientos")
-            base_view = dash[["Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador", "Fecha_emision", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento", "Responsable", "Correo", "Archivo", "Hoja", "source_row"]].rename(columns={"source_row": "Fila origen"})
-            st.dataframe(base_view, use_container_width=True, hide_index=True)
-            csv_bytes = base_view.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("⬇️ Descargar base filtrada CSV", data=csv_bytes, file_name=f"base_vencimientos_{today.isoformat()}.csv", mime="text/csv", key="download_dashboard_csv")
+            st.markdown("#### Resumen por proyecto")
+            summary_display = summary.copy()
+            summary_display["% vencidos"] = summary_display["% vencidos"].map(lambda x: f"{x:.1f}%")
+            summary_display["% próximos a vencer"] = summary_display["% próximos a vencer"].map(lambda x: f"{x:.1f}%")
+            st.dataframe(summary_display, use_container_width=True, hide_index=True, height=min(500, 45 * (len(summary_display) + 1)))
 
-        st.caption("Los gráficos son interactivos: pasa el cursor para ver valores y usa los filtros para actualizar gráficos y base. Los estados se calculan por fecha; confirma periodicidades con el área responsable.")
+            st.markdown("#### Descargar base filtrada")
+            st.caption("La descarga respeta los filtros de categoría y proyecto seleccionados. El Excel contiene una hoja resumen por proyecto y otra con el detalle de los registros filtrados.")
+            detail_cols = [
+                "Proyecto", "Categoria", "Tipo_control", "Persona_activo", "Identificador",
+                "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento", "Responsable", "Correo"
+            ]
+            detail = dash[detail_cols].copy()
+            excel_bytes = build_filtered_excel(dash, summary, today)
+            csv_detail = detail.rename(columns={
+                "Categoria": "Categoría", "Tipo_control": "Tipo de control",
+                "Persona_activo": "Persona / activo", "Identificador": "Código / placa",
+                "Fecha_vencimiento": "Fecha de vencimiento", "Dias_restantes": "Días restantes",
+                "Estado_seguimiento": "Estado"
+            })
+            download1, download2 = st.columns(2)
+            with download1:
+                st.download_button(
+                    "⬇️ Descargar Excel filtrado (resumen + base)", data=excel_bytes,
+                    file_name=f"vencimientos_filtrados_{today.isoformat()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_dashboard_excel", use_container_width=True
+                )
+            with download2:
+                st.download_button(
+                    "⬇️ Descargar base filtrada CSV", data=csv_detail.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"base_filtrada_{today.isoformat()}.csv", mime="text/csv",
+                    key="download_dashboard_csv", use_container_width=True
+                )
+            with st.expander("Ver detalle de registros filtrados"):
+                detail_display = dash[[
+                    "Proyecto", "Categoria", "Tipo_control", "Persona_activo", "Identificador",
+                    "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento"
+                ]].rename(columns={
+                    "Categoria": "Categoría", "Tipo_control": "Tipo de control",
+                    "Persona_activo": "Persona / activo", "Identificador": "Código / placa",
+                    "Fecha_vencimiento": "Fecha de vencimiento", "Dias_restantes": "Días restantes",
+                    "Estado_seguimiento": "Estado"
+                })
+                st.dataframe(detail_display, use_container_width=True, hide_index=True)
+
+        st.caption("El panel es interactivo: modifica los filtros para recalcular las cantidades, porcentajes, gráfico y archivos descargables.")
 
 with tab_sources:
     st.subheader("Archivos y hojas importados")
