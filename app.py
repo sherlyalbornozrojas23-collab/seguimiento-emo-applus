@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import sqlite3
 import json
 import hashlib
@@ -405,7 +406,7 @@ else:
     ])
 
 with tab_dashboard:
-    st.subheader("Resumen corporativo")
+    st.subheader("Resumen corporativo interactivo")
     if all_records.empty:
         st.info("Aún no hay registros consolidados. Entra en «Cargar Excel» para importar la primera base.")
     else:
@@ -416,31 +417,83 @@ with tab_dashboard:
         unknown = int(all_records["Fecha_vencimiento"].isna().sum())
         a, b, c, d, e = st.columns(5)
         a.metric("Registros", total)
-        b.metric("Vencidos", expired)
+        b.metric("Vencidos", expired, delta=None)
         c.metric("Vencen hoy", today_count)
         d.metric("Próximos a vencer", soon)
         e.metric("Fecha por revisar", unknown)
 
-        st.markdown("#### Vencimientos por categoría")
-        by_category = all_records.groupby("Categoria", dropna=False).size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
-        st.dataframe(by_category, use_container_width=True, hide_index=True)
+        st.markdown("#### Filtros del panel")
+        fc1, fc2, fc3 = st.columns(3)
+        dash_categories = options_for(all_records, "Categoria")
+        dash_category = fc1.selectbox("Categoría", dash_categories, key="dash_category")
+        dash_projects = options_for(all_records, "Proyecto")
+        dash_project = fc2.selectbox("Proyecto / área", dash_projects, key="dash_project")
+        dash_statuses = ["Todos"] + sorted(all_records["Estado_seguimiento"].dropna().astype(str).unique().tolist())
+        dash_status = fc3.selectbox("Estado", dash_statuses, key="dash_status")
 
-        st.markdown("#### Acciones prioritarias")
-        priority = all_records[
-            all_records["Dias_restantes"].apply(
-                lambda x: pd.notna(x) and (x < 0 or x == 0 or (x > 0 and x <= max(warning_days or [30])))
-            )
-        ].sort_values("Dias_restantes", na_position="last")
-        if priority.empty:
-            st.success("No hay vencimientos prioritarios según la anticipación configurada.")
+        dash = all_records.copy()
+        if dash_category != "Todos":
+            dash = dash[dash["Categoria"].astype(str) == dash_category]
+        if dash_project != "Todos":
+            dash = dash[dash["Proyecto"].astype(str) == dash_project]
+        if dash_status != "Todos":
+            dash = dash[dash["Estado_seguimiento"].astype(str) == dash_status]
+
+        if dash.empty:
+            st.warning("No hay registros para los filtros seleccionados.")
         else:
-            st.dataframe(
-                priority[["Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador",
-                          "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento",
-                          "Responsable", "Correo", "Archivo", "Hoja", "source_row"]],
-                use_container_width=True, hide_index=True
-            )
-        st.caption("Los estados son cálculos administrativos basados en fechas. Confirma las obligaciones y periodicidades con el área responsable.")
+            chart1, chart2 = st.columns(2)
+            with chart1:
+                st.markdown("#### Registros por categoría")
+                by_category = dash.groupby("Categoria", dropna=False).size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
+                fig_cat = px.bar(by_category, x="Categoria", y="Cantidad", text="Cantidad", color="Categoria", title="Volumen por categoría", hover_data={"Cantidad": True})
+                fig_cat.update_layout(showlegend=False, xaxis_title="Categoría", yaxis_title="Cantidad", xaxis_tickangle=-25, height=390)
+                fig_cat.update_traces(textposition="outside")
+                st.plotly_chart(fig_cat, use_container_width=True, key="chart_category")
+            with chart2:
+                st.markdown("#### Estado de los vencimientos")
+                by_status = dash.groupby("Estado_seguimiento", dropna=False).size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
+                fig_status = px.bar(by_status, x="Estado_seguimiento", y="Cantidad", text="Cantidad", color="Estado_seguimiento", title="Registros por estado", hover_data={"Cantidad": True})
+                fig_status.update_layout(xaxis_title="Estado", yaxis_title="Cantidad", xaxis_tickangle=-25, height=390)
+                fig_status.update_traces(textposition="outside")
+                st.plotly_chart(fig_status, use_container_width=True, key="chart_status")
+
+            chart3, chart4 = st.columns(2)
+            with chart3:
+                st.markdown("#### Vencimientos por proyecto / área")
+                by_project = dash.groupby("Proyecto", dropna=False).size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False).head(15)
+                fig_project = px.bar(by_project, x="Proyecto", y="Cantidad", text="Cantidad", color="Cantidad", title="Top 15 proyectos por volumen", hover_data={"Cantidad": True})
+                fig_project.update_layout(xaxis_title="Proyecto / área", yaxis_title="Cantidad", xaxis_tickangle=-30, height=390, coloraxis_showscale=False)
+                fig_project.update_traces(textposition="outside")
+                st.plotly_chart(fig_project, use_container_width=True, key="chart_project")
+            with chart4:
+                st.markdown("#### Distribución por plazo")
+                def bucket(days):
+                    if pd.isna(days): return "Fecha por revisar"
+                    if days < 0: return "Vencidos"
+                    if days == 0: return "Vence hoy"
+                    if days <= 7: return "1–7 días"
+                    if days <= 15: return "8–15 días"
+                    if days <= 30: return "16–30 días"
+                    if days <= 60: return "31–60 días"
+                    return "Más de 60 días"
+                bucket_order = ["Vencidos", "Vence hoy", "1–7 días", "8–15 días", "16–30 días", "31–60 días", "Más de 60 días", "Fecha por revisar"]
+                plazo = dash.copy()
+                plazo["Plazo"] = plazo["Dias_restantes"].apply(bucket)
+                by_due = plazo.groupby("Plazo").size().reindex(bucket_order, fill_value=0).reset_index(name="Cantidad")
+                by_due = by_due[by_due["Cantidad"] > 0]
+                fig_due = px.bar(by_due, x="Plazo", y="Cantidad", text="Cantidad", color="Plazo", title="Anticipación de los vencimientos", category_orders={"Plazo": bucket_order}, hover_data={"Cantidad": True})
+                fig_due.update_layout(xaxis_title="Plazo", yaxis_title="Cantidad", xaxis_tickangle=-25, height=390, showlegend=False)
+                fig_due.update_traces(textposition="outside")
+                st.plotly_chart(fig_due, use_container_width=True, key="chart_due")
+
+            st.markdown("#### Base filtrada de vencimientos")
+            base_view = dash[["Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador", "Fecha_emision", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento", "Responsable", "Correo", "Archivo", "Hoja", "source_row"]].rename(columns={"source_row": "Fila origen"})
+            st.dataframe(base_view, use_container_width=True, hide_index=True)
+            csv_bytes = base_view.to_csv(index=False).encode("utf-8-sig")
+            st.download_button("⬇️ Descargar base filtrada CSV", data=csv_bytes, file_name=f"base_vencimientos_{today.isoformat()}.csv", mime="text/csv", key="download_dashboard_csv")
+
+        st.caption("Los gráficos son interactivos: pasa el cursor para ver valores y usa los filtros para actualizar gráficos y base. Los estados se calculan por fecha; confirma periodicidades con el área responsable.")
 
 with tab_sources:
     st.subheader("Archivos y hojas importados")
@@ -485,16 +538,43 @@ with tab_records:
         st.dataframe(display, use_container_width=True, hide_index=True)
 
 with tab_export:
-    st.subheader("Exportar reportes")
+    st.subheader("Informes ejecutivos y base consolidada")
     if all_records.empty:
         st.info("Importa al menos una hoja para habilitar reportes.")
     else:
+        report_filters_1, report_filters_2 = st.columns(2)
+        report_cat_options = options_for(all_records, "Categoria")
+        report_cat = report_filters_1.selectbox("Filtrar informe por categoría", report_cat_options, key="report_cat")
+        report_project_options = options_for(all_records, "Proyecto")
+        report_project = report_filters_2.selectbox("Filtrar informe por proyecto / área", report_project_options, key="report_project")
+        report_data = all_records.copy()
+        if report_cat != "Todos":
+            report_data = report_data[report_data["Categoria"].astype(str) == report_cat]
+        if report_project != "Todos":
+            report_data = report_data[report_data["Proyecto"].astype(str) == report_project]
+
+        status_summary = report_data.groupby("Estado_seguimiento").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
+        cat_summary = report_data.groupby("Categoria").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
+        project_summary = report_data.groupby("Proyecto").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
+        st.markdown("#### Vista gráfica del informe")
+        report_chart_1, report_chart_2 = st.columns(2)
+        with report_chart_1:
+            fig_report_status = px.bar(status_summary, x="Estado_seguimiento", y="Cantidad", color="Estado_seguimiento", text="Cantidad", title="Resumen por estado")
+            fig_report_status.update_layout(xaxis_title="Estado", yaxis_title="Cantidad", xaxis_tickangle=-25, height=360)
+            fig_report_status.update_traces(textposition="outside")
+            st.plotly_chart(fig_report_status, use_container_width=True, key="report_status_chart")
+        with report_chart_2:
+            fig_report_cat = px.bar(cat_summary, x="Categoria", y="Cantidad", color="Categoria", text="Cantidad", title="Resumen por categoría")
+            fig_report_cat.update_layout(xaxis_title="Categoría", yaxis_title="Cantidad", xaxis_tickangle=-25, height=360, showlegend=False)
+            fig_report_cat.update_traces(textposition="outside")
+            st.plotly_chart(fig_report_cat, use_container_width=True, key="report_category_chart")
+
         export_cols = [
             "Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador",
             "Fecha_emision", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento",
             "Responsable", "Correo", "Archivo", "Hoja", "source_row", "uploaded_by"
         ]
-        report = all_records[export_cols].rename(columns={
+        report = report_data[export_cols].rename(columns={
             "source_row": "Fila_origen", "uploaded_by": "Cargado_por"
         }).copy()
         priority_report = report[
@@ -503,16 +583,63 @@ with tab_export:
         ]
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            report.to_excel(writer, index=False, sheet_name="Todos_los_vencimientos")
+            report.to_excel(writer, index=False, sheet_name="Base_consolidada")
             priority_report.to_excel(writer, index=False, sheet_name="Acciones_prioritarias")
+            cat_summary.to_excel(writer, index=False, sheet_name="Resumen_categoria")
+            status_summary.to_excel(writer, index=False, sheet_name="Resumen_estado")
+            project_summary.to_excel(writer, index=False, sheet_name="Resumen_proyecto")
             if not all_sources.empty:
                 all_sources.to_excel(writer, index=False, sheet_name="Archivos_importados")
+            # Add bar charts to the Excel workbook so the report includes visual summaries.
+            from openpyxl.chart import BarChart, Reference
+            from openpyxl.styles import Font, PatternFill, Alignment
+            workbook = writer.book
+            for sheet_name, title in [("Resumen_categoria", "Vencimientos por categoría"), ("Resumen_estado", "Vencimientos por estado"), ("Resumen_proyecto", "Vencimientos por proyecto")]:
+                ws = workbook[sheet_name]
+                ws.freeze_panes = "A2"
+                ws.auto_filter.ref = ws.dimensions
+                for cell in ws[1]:
+                    cell.font = Font(bold=True, color="FFFFFF")
+                    cell.fill = PatternFill("solid", fgColor="174A7E")
+                    cell.alignment = Alignment(horizontal="center")
+                for col_cells in ws.columns:
+                    letter = col_cells[0].column_letter
+                    max_len = max((len(str(c.value or "")) for c in col_cells), default=10)
+                    ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 36)
+                if ws.max_row > 1:
+                    chart = BarChart()
+                    chart.type = "bar"
+                    chart.style = 10
+                    chart.title = title
+                    chart.y_axis.title = "Cantidad"
+                    chart.x_axis.title = "Grupo"
+                    data = Reference(ws, min_col=2, min_row=1, max_row=ws.max_row)
+                    cats = Reference(ws, min_col=1, min_row=2, max_row=ws.max_row)
+                    chart.add_data(data, titles_from_data=True)
+                    chart.set_categories(cats)
+                    chart.height = 7
+                    chart.width = 15
+                    ws.add_chart(chart, "D2")
+            for sheet_name in ["Base_consolidada", "Acciones_prioritarias", "Archivos_importados"]:
+                if sheet_name in workbook.sheetnames:
+                    ws = workbook[sheet_name]
+                    ws.freeze_panes = "A2"
+                    ws.auto_filter.ref = ws.dimensions
+                    for cell in ws[1]:
+                        cell.font = Font(bold=True, color="FFFFFF")
+                        cell.fill = PatternFill("solid", fgColor="174A7E")
+                    for col_cells in ws.columns:
+                        letter = col_cells[0].column_letter
+                        max_len = max((len(str(c.value or "")) for c in col_cells[:100]), default=10)
+                        ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 36)
+
         st.download_button(
-            "⬇️ Descargar reporte corporativo Excel",
+            "⬇️ Descargar informe ejecutivo Excel con gráficos",
             data=output.getvalue(),
-            file_name=f"reporte_corporativo_vencimientos_{today.isoformat()}.xlsx",
+            file_name=f"informe_corporativo_vencimientos_{today.isoformat()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+        st.caption("El Excel incluye la base consolidada, acciones prioritarias, resúmenes y gráficos de barras. Los gráficos del panel web responden a los filtros; los del Excel reflejan los datos incluidos al descargarlo.")
 
 st.divider()
 st.caption(
