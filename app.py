@@ -565,15 +565,20 @@ def build_filtered_excel(detail, summary, today):
 with tab_dashboard:
     st.subheader("Estadísticas de documentos por proyecto y categoría")
     if all_records.empty:
-        st.info("Aún no hay registros consolidados. Entra en «Cargar Excel» para importar la primera base.")
+        st.info("Aún no hay registros consolidados. Entra en «Cargar archivos» para importar la primera base.")
     else:
-        threshold = max(warning_days or [30])
-        st.caption(f"Vencido = fecha anterior a {today.strftime('%d/%m/%Y')}. Próximo a vencer = dentro de los próximos {threshold} días. Las cifras se recalculan por proyecto y categoría.")
-        fc1, fc2 = st.columns(2)
-        dash_categories = options_for(all_records, "Categoria")
-        dash_category = fc1.selectbox("Categoría", dash_categories, key="dash_category")
-        dash_projects = options_for(all_records, "Proyecto")
-        dash_project = fc2.selectbox("Proyecto", dash_projects, key="dash_project")
+        # El panel ejecutivo usa un horizonte fijo de 30 días, tal como se solicitó.
+        threshold = 30
+        st.caption(f"Fecha de evaluación: {today.strftime('%d/%m/%Y')} · Vencido = fecha anterior a hoy · Próximo a vencer = entre 1 y 30 días. Los porcentajes se calculan sobre los documentos del filtro seleccionado.")
+
+        with st.container(border=True):
+            st.markdown("### 🔎 Filtros interactivos")
+            st.caption("Selecciona una categoría y/o un proyecto. Los indicadores, gráficos y descargas se actualizarán automáticamente.")
+            fc1, fc2 = st.columns(2)
+            dash_categories = options_for(all_records, "Categoria")
+            dash_projects = options_for(all_records, "Proyecto")
+            dash_category = fc1.selectbox("Filtrar por categoría", dash_categories, key="dash_category")
+            dash_project = fc2.selectbox("Filtrar por proyecto", dash_projects, key="dash_project")
 
         dash = all_records.copy()
         if dash_category != "Todos":
@@ -592,7 +597,7 @@ with tab_dashboard:
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Documentos filtrados", total_docs)
             m2.metric("Vencidos", expired_total, f"{(expired_total / total_docs * 100 if total_docs else 0):.1f}% del total")
-            m3.metric("Próximos a vencer", soon_total, f"{(soon_total / total_docs * 100 if total_docs else 0):.1f}% del total")
+            m3.metric("Próximos a vencer (30 días)", soon_total, f"{(soon_total / total_docs * 100 if total_docs else 0):.1f}% del total")
             m4.metric("Vencen hoy", due_today_total)
 
             chart_data = summary.melt(
