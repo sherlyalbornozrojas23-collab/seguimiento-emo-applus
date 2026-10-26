@@ -282,9 +282,7 @@ def calc_status(value, today, thresholds):
         return "Vence hoy"
     if days == 1:
         return "Vence en 1 día"
-    if thresholds and days <= max(thresholds):
-        if days in thresholds:
-            return f"Vence en {days} días"
+    if 2 <= days <= 7:
         return "Próximo a vencer"
     return "Vigente según fecha"
 
@@ -623,22 +621,26 @@ with tab_dashboard:
     else:
         # El panel ejecutivo usa un horizonte fijo de 30 días, tal como se solicitó.
         threshold = 30
-        st.caption(f"Fecha de evaluación: {today.strftime('%d/%m/%Y')} · Vencido = fecha anterior a hoy · Próximo a vencer = entre 1 y 30 días. Los porcentajes se calculan sobre los documentos del filtro seleccionado.")
+        st.caption(f"Fecha de evaluación: {today.strftime('%d/%m/%Y')} · Vencido = fecha anterior a hoy · Vence hoy = hoy · Vence en 1 día = mañana · Próximos 7 días = de 2 a 7 días · Vigente = más de 7 días. Las fechas vacías o inválidas se muestran como 'Fecha por revisar'.")
 
         with st.container(border=True):
             st.markdown("### 🔎 Filtros interactivos")
             st.caption("Selecciona una categoría y/o un proyecto. Los indicadores, gráficos y descargas se actualizarán automáticamente.")
-            fc1, fc2 = st.columns(2)
+            fc1, fc2, fc3 = st.columns(3)
             dash_categories = options_for(all_records, "Categoria")
             dash_projects = options_for(all_records, "Proyecto")
-            dash_category = fc1.selectbox("Filtrar por categoría", dash_categories, key="dash_category")
+            dash_states = ["Todos"] + sorted(all_records["Estado_seguimiento"].dropna().astype(str).unique().tolist())
+            dash_category = fc1.selectbox("Filtrar por tipo/categoría", dash_categories, key="dash_category")
             dash_project = fc2.selectbox("Filtrar por proyecto", dash_projects, key="dash_project")
+            dash_state = fc3.selectbox("Filtrar por estado", dash_states, key="dash_state")
 
         dash = all_records.copy()
         if dash_category != "Todos":
             dash = dash[dash["Categoria"].astype(str) == dash_category]
         if dash_project != "Todos":
             dash = dash[dash["Proyecto"].astype(str) == dash_project]
+        if dash_state != "Todos":
+            dash = dash[dash["Estado_seguimiento"].astype(str) == dash_state]
 
         if dash.empty:
             st.warning("No hay registros para los filtros seleccionados. Elige «Todos» en los filtros para volver a ver la base completa.")
@@ -675,21 +677,51 @@ with tab_dashboard:
             fig_project.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig_project, use_container_width=True, key="chart_project_expiry_summary")
 
-            st.markdown("#### Tabla dinámica: vencimientos por proyecto y categoría")
-            by_cat_project = dash.assign(
-                _vencido=pd.to_numeric(dash["Dias_restantes"], errors="coerce").lt(0),
-                _proximo=pd.to_numeric(dash["Dias_restantes"], errors="coerce").gt(1) & pd.to_numeric(dash["Dias_restantes"], errors="coerce").le(threshold),
-                _hoy=pd.to_numeric(dash["Dias_restantes"], errors="coerce").eq(0),
-                _un_dia=pd.to_numeric(dash["Dias_restantes"], errors="coerce").eq(1)
-            ).groupby(["Proyecto", "Categoria"], dropna=False).agg(
-                **{"Total documentos": ("Categoria", "size"), "Vencidos": ("_vencido", "sum"),
-                   "Vencen hoy": ("_hoy", "sum"), "Vence en 1 día": ("_un_dia", "sum"), "Próximos a vencer": ("_proximo", "sum")}
-            ).reset_index().sort_values(["Vencidos", "Próximos a vencer", "Total documentos"], ascending=False)
-            st.dataframe(by_cat_project, use_container_width=True, hide_index=True)
-            cat_chart_data = by_cat_project.melt(id_vars=["Proyecto", "Categoria"], value_vars=["Vencidos", "Vence en 1 día", "Próximos a vencer"], var_name="Estado", value_name="Cantidad")
-            fig_cat_project = px.bar(cat_chart_data, x="Categoria", y="Cantidad", color="Estado", barmode="group", facet_col="Proyecto", facet_col_wrap=2, title="Vencidos y próximos a vencer por categoría y proyecto")
-            fig_cat_project.update_layout(height=max(380, 260 * max(1, by_cat_project["Proyecto"].nunique())), xaxis_title="Categoría", yaxis_title="Documentos", legend_title="")
-            st.plotly_chart(fig_cat_project, use_container_width=True, key="chart_category_project")
+            st.markdown("#### Tabla dinámica: resumen por proyecto y tipo de documento")
+            pivot_base = dash.copy()
+            days_pivot = pd.to_numeric(pivot_base["Dias_restantes"], errors="coerce")
+            pivot_base["_con_fecha"] = days_pivot.notna()
+            pivot_base["_vencido"] = days_pivot.lt(0)
+            pivot_base["_hoy"] = days_pivot.eq(0)
+            pivot_base["_un_dia"] = days_pivot.eq(1)
+            pivot_base["_proximo_7"] = days_pivot.ge(2) & days_pivot.le(7)
+            pivot_base["_vigente"] = days_pivot.gt(7)
+            # Tipo_control se deriva del tipo de documento importado; si está vacío se usa la categoría.
+            pivot_base["Tipo_control"] = pivot_base["Tipo_control"].fillna("").astype(str).str.strip()
+            pivot_base.loc[pivot_base["Tipo_control"].eq(""), "Tipo_control"] = pivot_base.loc[pivot_base["Tipo_control"].eq(""), "Categoria"]
+            by_cat_project = pivot_base.groupby(["Proyecto", "Tipo_control"], dropna=False).agg(
+                **{"Total documentos": ("Tipo_control", "size"),
+                   "Con fecha válida": ("_con_fecha", "sum"),
+                   "Vencidos": ("_vencido", "sum"),
+                   "Vence hoy": ("_hoy", "sum"),
+                   "Vence en 1 día": ("_un_dia", "sum"),
+                   "Próximos 7 días": ("_proximo_7", "sum"),
+                   "Vigentes": ("_vigente", "sum"),
+                   "Fecha por revisar": ("_con_fecha", lambda values: int((~values.astype(bool)).sum()))}
+            ).reset_index().rename(columns={"Tipo_control": "Tipo de documento"})
+            by_cat_project = by_cat_project.sort_values(
+                ["Vencidos", "Vence en 1 día", "Próximos 7 días", "Total documentos"],
+                ascending=False
+            ).reset_index(drop=True)
+            if by_cat_project.empty:
+                st.info("No hay combinaciones para mostrar con los filtros seleccionados.")
+            else:
+                st.dataframe(by_cat_project, use_container_width=True, hide_index=True)
+                cat_chart_data = by_cat_project.melt(
+                    id_vars=["Proyecto", "Tipo de documento"],
+                    value_vars=["Vencidos", "Vence hoy", "Vence en 1 día", "Próximos 7 días", "Vigentes", "Fecha por revisar"],
+                    var_name="Estado", value_name="Cantidad"
+                )
+                fig_cat_project = px.bar(
+                    cat_chart_data, x="Tipo de documento", y="Cantidad", color="Estado",
+                    barmode="group", facet_col="Proyecto", facet_col_wrap=2,
+                    title="Vencimientos por tipo de documento y proyecto"
+                )
+                fig_cat_project.update_layout(
+                    height=max(380, 260 * max(1, by_cat_project["Proyecto"].nunique())),
+                    xaxis_title="Tipo de documento", yaxis_title="Documentos", legend_title=""
+                )
+                st.plotly_chart(fig_cat_project, use_container_width=True, key="chart_category_project")
 
             with st.expander("Ver detalle de registros filtrados"):
                 detail_display = dash[[
