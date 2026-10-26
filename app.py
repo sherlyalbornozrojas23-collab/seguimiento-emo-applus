@@ -682,8 +682,15 @@ with tab_sources:
             Hojas_importadas=("sheets", lambda x: ", ".join(sorted(set(str(v) for v in x if str(v).strip())))),
             Cargado_por=("uploaded_by", "last"),
             Ultima_importacion=("Fecha de importación", "max"),
-            Hojas=("source_key", "count")
-        ).reset_index().rename(columns={"source_file": "Nombre del archivo", "Hojas_importadas": "Hojas", "Ultima_importacion": "Última importación"})
+            Cantidad_de_hojas=("source_key", "count")
+        ).reset_index().rename(columns={
+            "source_file": "Nombre del archivo",
+            "Hojas_importadas": "Nombres de las hojas",
+            "Ultima_importacion": "Última importación",
+            "Cantidad_de_hojas": "Cantidad de hojas"
+        })
+        # Evita nombres duplicados, que provocan un ValueError en pyarrow/st.dataframe.
+        file_view = file_view.loc[:, ~file_view.columns.duplicated()].copy()
         st.dataframe(file_view, use_container_width=True, hide_index=True)
         st.caption("Aquí se muestran los nombres de los archivos y las hojas que se importaron. Volver a importar una hoja actualiza sus registros.")
 
