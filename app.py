@@ -280,6 +280,8 @@ def calc_status(value, today, thresholds):
         return "Vencido"
     if days == 0:
         return "Vence hoy"
+    if days == 1:
+        return "Vence en 1 día"
     if thresholds and days <= max(thresholds):
         if days in thresholds:
             return f"Vence en {days} días"
@@ -314,7 +316,7 @@ st.caption("Consolida bases Excel/CSV, revisa fechas y genera reportes por proye
 with st.sidebar:
     st.header("Configuración")
     today = st.date_input("Fecha de evaluación", value=date.today())
-    warning_days = st.multiselect("Anticipación de alertas (días)", [7, 15, 30, 45, 60, 90], default=[7, 15, 30])
+    warning_days = st.multiselect("Anticipación de alertas (días)", [1, 7, 15, 30, 45, 60, 90], default=[1, 7, 15, 30])
     uploader = st.text_input("Nombre del asistente que carga", placeholder="Ej. Sherly / Administración")
     st.caption("Las alertas se calculan por fecha. El sistema no valida aptitud médica ni renueva documentos.")
     st.divider()
@@ -509,7 +511,7 @@ def project_expiry_summary(frame, threshold):
     days = pd.to_numeric(data["Dias_restantes"], errors="coerce")
     data["_vencido"] = days < 0
     data["_hoy"] = days == 0
-    data["_proximo"] = days.gt(0) & days.le(threshold)
+    data["_proximo"] = days.gt(1) & days.le(threshold)
     summary = data.groupby("Proyecto", dropna=False).agg(
         **{
             "Total documentos": ("Proyecto", "size"),
@@ -637,8 +639,14 @@ with tab_dashboard:
             dash = dash[dash["Proyecto"].astype(str) == dash_project]
 
         if dash.empty:
-            st.warning("No hay registros para los filtros seleccionados.")
+            st.warning("No hay registros para los filtros seleccionados. Elige «Todos» en los filtros para volver a ver la base completa.")
         else:
+            valid_dates = int(pd.to_numeric(dash["Dias_restantes"], errors="coerce").notna().sum())
+            invalid_dates = len(dash) - valid_dates
+            if valid_dates == 0:
+                st.warning("Hay registros, pero ninguna fecha de vencimiento válida. Revisa la columna Fecha de vencimiento al importar el Excel.")
+            elif invalid_dates:
+                st.info(f"{invalid_dates} registro(s) no tienen una fecha de vencimiento reconocida y no se contabilizan en los indicadores de vencimiento.")
             summary = project_expiry_summary(dash, threshold)
             total_docs = int(summary["Total documentos"].sum())
             expired_total = int(summary["Vencidos"].sum())
@@ -648,7 +656,8 @@ with tab_dashboard:
             m1.metric("Documentos filtrados", total_docs)
             m2.metric("Vencidos", expired_total, f"{(expired_total / total_docs * 100 if total_docs else 0):.1f}% del total")
             m3.metric("Próximos a vencer (30 días)", soon_total, f"{(soon_total / total_docs * 100 if total_docs else 0):.1f}% del total")
-            m4.metric("Vencen hoy", due_today_total)
+            m4.metric("Vence en 1 día", due_tomorrow_total)
+            m5.metric("Vencen hoy", due_today_total)
 
             chart_data = summary.melt(
                 id_vars="Proyecto", value_vars=["Vencidos", "Próximos a vencer"],
@@ -666,14 +675,15 @@ with tab_dashboard:
             st.markdown("#### Tabla dinámica: vencimientos por proyecto y categoría")
             by_cat_project = dash.assign(
                 _vencido=pd.to_numeric(dash["Dias_restantes"], errors="coerce").lt(0),
-                _proximo=pd.to_numeric(dash["Dias_restantes"], errors="coerce").gt(0) & pd.to_numeric(dash["Dias_restantes"], errors="coerce").le(threshold),
-                _hoy=pd.to_numeric(dash["Dias_restantes"], errors="coerce").eq(0)
+                _proximo=pd.to_numeric(dash["Dias_restantes"], errors="coerce").gt(1) & pd.to_numeric(dash["Dias_restantes"], errors="coerce").le(threshold),
+                _hoy=pd.to_numeric(dash["Dias_restantes"], errors="coerce").eq(0),
+                _un_dia=pd.to_numeric(dash["Dias_restantes"], errors="coerce").eq(1)
             ).groupby(["Proyecto", "Categoria"], dropna=False).agg(
                 **{"Total documentos": ("Categoria", "size"), "Vencidos": ("_vencido", "sum"),
-                   "Vencen hoy": ("_hoy", "sum"), "Próximos a vencer": ("_proximo", "sum")}
+                   "Vencen hoy": ("_hoy", "sum"), "Vence en 1 día": ("_un_dia", "sum"), "Próximos a vencer": ("_proximo", "sum")}
             ).reset_index().sort_values(["Vencidos", "Próximos a vencer", "Total documentos"], ascending=False)
             st.dataframe(by_cat_project, use_container_width=True, hide_index=True)
-            cat_chart_data = by_cat_project.melt(id_vars=["Proyecto", "Categoria"], value_vars=["Vencidos", "Próximos a vencer"], var_name="Estado", value_name="Cantidad")
+            cat_chart_data = by_cat_project.melt(id_vars=["Proyecto", "Categoria"], value_vars=["Vencidos", "Vence en 1 día", "Próximos a vencer"], var_name="Estado", value_name="Cantidad")
             fig_cat_project = px.bar(cat_chart_data, x="Categoria", y="Cantidad", color="Estado", barmode="group", facet_col="Proyecto", facet_col_wrap=2, title="Vencidos y próximos a vencer por categoría y proyecto")
             fig_cat_project.update_layout(height=max(380, 260 * max(1, by_cat_project["Proyecto"].nunique())), xaxis_title="Categoría", yaxis_title="Documentos", legend_title="")
             st.plotly_chart(fig_cat_project, use_container_width=True, key="chart_category_project")
