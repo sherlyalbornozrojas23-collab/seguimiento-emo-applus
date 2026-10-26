@@ -140,14 +140,30 @@ def safe_json_value(value):
     return str(value).strip()
 
 def parse_dates(series):
-    # Handles Excel dates, ISO dates and common day/month/year formats.
+    """Parse dates from Excel serials, datetime cells and common text formats."""
     if pd.api.types.is_datetime64_any_dtype(series):
         return pd.to_datetime(series, errors="coerce").dt.date
-    try:
-        parsed = pd.to_datetime(series, errors="coerce", dayfirst=True, format="mixed")
-    except (TypeError, ValueError):
-        parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
-    return parsed.dt.date
+    def one(value):
+        if value is None or pd.isna(value) or str(value).strip() == "":
+            return None
+        if isinstance(value, (pd.Timestamp, datetime, date)):
+            return value.date() if isinstance(value, (pd.Timestamp, datetime)) else value
+        # Excel serial dates occasionally arrive as numbers.
+        if isinstance(value, (int, float)) and 20000 <= float(value) <= 80000:
+            try:
+                return (pd.Timestamp("1899-12-30") + pd.to_timedelta(float(value), unit="D")).date()
+            except Exception:
+                return None
+        text = str(value).strip()
+        for dayfirst in (True, False):
+            try:
+                parsed = pd.to_datetime(text, errors="raise", dayfirst=dayfirst)
+                if not pd.isna(parsed):
+                    return parsed.date()
+            except Exception:
+                pass
+        return None
+    return series.apply(one)
 
 def db_connect():
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
@@ -304,9 +320,8 @@ with st.sidebar:
     st.divider()
     st.caption("La base consolidada se guarda en la carpeta `data`. En alojamientos con disco efímero, configura almacenamiento persistente antes del uso compartido real.")
 
-tab_dashboard, tab_upload, tab_sources, tab_records, tab_export = st.tabs([
-    "📊 Panel general", "📥 Cargar Excel", "🗂️ Archivos cargados",
-    "🔎 Registros", "📤 Reportes"
+tab_dashboard, tab_upload, tab_sources, tab_export = st.tabs([
+    "📊 Panel de control", "📥 Cargar archivos", "🗂️ Archivos cargados", "📤 Reportes"
 ])
 
 with tab_upload:
@@ -548,12 +563,12 @@ def build_filtered_excel(detail, summary, today):
 
 
 with tab_dashboard:
-    st.subheader("Vencimientos por proyecto")
+    st.subheader("Estadísticas de documentos por proyecto y categoría")
     if all_records.empty:
         st.info("Aún no hay registros consolidados. Entra en «Cargar Excel» para importar la primera base.")
     else:
         threshold = max(warning_days or [30])
-        st.caption(f"Próximos a vencer: documentos que vencen dentro de los próximos {threshold} días. Los porcentajes se calculan sobre el total de registros de cada proyecto.")
+        st.caption(f"Vencido = fecha anterior a {today.strftime('%d/%m/%Y')}. Próximo a vencer = dentro de los próximos {threshold} días. Las cifras se recalculan por proyecto y categoría.")
         fc1, fc2 = st.columns(2)
         dash_categories = options_for(all_records, "Categoria")
         dash_category = fc1.selectbox("Categoría", dash_categories, key="dash_category")
@@ -592,6 +607,21 @@ with tab_dashboard:
             fig_project.update_layout(height=max(330, min(650, 38 * len(summary) + 130)), xaxis_title="Cantidad de documentos", yaxis_title="", legend_title="", margin=dict(l=10, r=20, t=60, b=20))
             fig_project.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig_project, use_container_width=True, key="chart_project_expiry_summary")
+
+            st.markdown("#### Resumen por proyecto y categoría")
+            by_cat_project = dash.assign(
+                _vencido=pd.to_numeric(dash["Dias_restantes"], errors="coerce").lt(0),
+                _proximo=pd.to_numeric(dash["Dias_restantes"], errors="coerce").gt(0) & pd.to_numeric(dash["Dias_restantes"], errors="coerce").le(threshold),
+                _hoy=pd.to_numeric(dash["Dias_restantes"], errors="coerce").eq(0)
+            ).groupby(["Proyecto", "Categoria"], dropna=False).agg(
+                **{"Total documentos": ("Categoria", "size"), "Vencidos": ("_vencido", "sum"),
+                   "Vencen hoy": ("_hoy", "sum"), "Próximos a vencer": ("_proximo", "sum")}
+            ).reset_index().sort_values(["Vencidos", "Próximos a vencer", "Total documentos"], ascending=False)
+            st.dataframe(by_cat_project, use_container_width=True, hide_index=True)
+            cat_chart_data = by_cat_project.melt(id_vars=["Proyecto", "Categoria"], value_vars=["Vencidos", "Próximos a vencer"], var_name="Estado", value_name="Cantidad")
+            fig_cat_project = px.bar(cat_chart_data, x="Categoria", y="Cantidad", color="Estado", barmode="group", facet_col="Proyecto", facet_col_wrap=2, title="Vencidos y próximos a vencer por categoría y proyecto")
+            fig_cat_project.update_layout(height=max(380, 260 * max(1, by_cat_project["Proyecto"].nunique())), xaxis_title="Categoría", yaxis_title="Documentos", legend_title="")
+            st.plotly_chart(fig_cat_project, use_container_width=True, key="chart_category_project")
 
             st.markdown("#### Resumen por proyecto")
             summary_display = summary.copy()
@@ -642,68 +672,47 @@ with tab_dashboard:
         st.caption("El panel es interactivo: modifica los filtros para recalcular las cantidades, porcentajes, gráfico y archivos descargables.")
 
 with tab_sources:
-    st.subheader("Archivos y hojas importados")
+    st.subheader("Archivos cargados")
     if all_sources.empty:
-        st.info("Todavía no se han importado archivos.")
+        st.info("Todavía no se han importado archivos. Carga un Excel en la pestaña «Archivos cargados».")
     else:
-        sources_view = all_sources.rename(columns={
-            "source_file": "Archivo", "source_hash": "Huella del archivo",
-            "uploaded_by": "Cargado por", "sheets": "Hoja",
-            "imported_at": "Fecha de importación"
-        })
-        st.dataframe(sources_view[["Archivo", "Hoja", "Cargado por", "Fecha de importación", "Huella del archivo"]], use_container_width=True, hide_index=True)
-        st.caption("La huella permite distinguir versiones del archivo. Al importar de nuevo una hoja con el mismo nombre, sus registros anteriores se reemplazan por la versión nueva.")
-
-with tab_records:
-    st.subheader("Buscar registros consolidados")
-    if all_records.empty:
-        st.info("No hay registros para mostrar.")
-    else:
-        f1, f2, f3, f4 = st.columns(4)
-        cat_options = options_for(all_records, "Categoria")
-        selected_cat = f1.selectbox("Tipo de documento", cat_options, key="records_category")
-        project_options = options_for(all_records, "Proyecto")
-        selected_project = f2.selectbox("Proyecto / área", project_options, key="records_project")
-        status_options = options_for(all_records, "Estado_seguimiento")
-        selected_status = f3.selectbox("Estado de vencimiento", status_options, key="records_status")
-        search = f4.text_input("Buscar trabajador, DNI, placa o responsable", key="records_search").strip().lower()
-        view = all_records.copy()
-        if selected_cat != "Todos":
-            view = view[view["Categoria"].astype(str) == selected_cat]
-        if selected_project != "Todos":
-            view = view[view["Proyecto"].astype(str) == selected_project]
-        if selected_status != "Todos":
-            view = view[view["Estado_seguimiento"].astype(str) == selected_status]
-        if search:
-            search_cols = ["Persona_activo", "Identificador", "Archivo", "Responsable", "Tipo_control", "Proyecto", "Correo", "Hoja"]
-            mask = pd.Series(False, index=view.index)
-            for col in search_cols:
-                mask = mask | view[col].astype(str).str.lower().str.contains(re.escape(search), na=False)
-            view = view[mask]
-        st.caption(f"Registros encontrados: {len(view)}")
-        display = view[[
-            "Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador",
-            "Fecha_emision", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento",
-            "Responsable", "Correo", "Archivo", "Hoja", "source_row"
-        ]].rename(columns={"source_row": "Fila origen"})
-        st.dataframe(display, use_container_width=True, hide_index=True)
+        sources_view = all_sources.copy()
+        sources_view["Fecha de importación"] = pd.to_datetime(sources_view["imported_at"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M")
+        file_view = sources_view.groupby("source_file", dropna=False).agg(
+            Hojas_importadas=("sheets", lambda x: ", ".join(sorted(set(str(v) for v in x if str(v).strip())))),
+            Cargado_por=("uploaded_by", "last"),
+            Ultima_importacion=("Fecha de importación", "max"),
+            Hojas=("source_key", "count")
+        ).reset_index().rename(columns={"source_file": "Nombre del archivo", "Hojas_importadas": "Hojas", "Ultima_importacion": "Última importación"})
+        st.dataframe(file_view, use_container_width=True, hide_index=True)
+        st.caption("Aquí se muestran los nombres de los archivos y las hojas que se importaron. Volver a importar una hoja actualiza sus registros.")
 
 with tab_export:
-    st.subheader("Informes ejecutivos y base consolidada")
+    st.subheader("Reportes descargables por vencimiento, proyecto y tipo de documento")
     if all_records.empty:
         st.info("Importa al menos una hoja para habilitar reportes.")
     else:
-        report_filters_1, report_filters_2 = st.columns(2)
+        report_filters_1, report_filters_2, report_filters_3 = st.columns(3)
         report_cat_options = options_for(all_records, "Categoria")
-        report_cat = report_filters_1.selectbox("Filtrar informe por categoría", report_cat_options, key="report_cat")
+        report_cat = report_filters_1.selectbox("Tipo de documento", report_cat_options, key="report_cat")
         report_project_options = options_for(all_records, "Proyecto")
-        report_project = report_filters_2.selectbox("Filtrar informe por proyecto / área", report_project_options, key="report_project")
+        report_project = report_filters_2.selectbox("Proyecto", report_project_options, key="report_project")
+        report_status_options = ["Todos", "Vencidos", "Próximos a vencer", "Vence hoy"]
+        report_status = report_filters_3.selectbox("Estado para descargar", report_status_options, key="report_status")
         report_data = all_records.copy()
         if report_cat != "Todos":
             report_data = report_data[report_data["Categoria"].astype(str) == report_cat]
         if report_project != "Todos":
             report_data = report_data[report_data["Proyecto"].astype(str) == report_project]
+        if report_status == "Vencidos":
+            report_data = report_data[report_data["Dias_restantes"].notna() & (report_data["Dias_restantes"] < 0)]
+        elif report_status == "Próximos a vencer":
+            report_data = report_data[report_data["Dias_restantes"].notna() & (report_data["Dias_restantes"] > 0) & (report_data["Dias_restantes"] <= max(warning_days or [30]))]
+        elif report_status == "Vence hoy":
+            report_data = report_data[report_data["Dias_restantes"] == 0]
 
+        if report_data.empty:
+            st.warning("No hay documentos que coincidan con los filtros seleccionados.")
         status_summary = report_data.groupby("Estado_seguimiento").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
         cat_summary = report_data.groupby("Categoria").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
         project_summary = report_data.groupby("Proyecto").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
@@ -728,10 +737,8 @@ with tab_export:
         report = report_data[export_cols].rename(columns={
             "source_row": "Fila_origen", "uploaded_by": "Cargado_por"
         }).copy()
-        priority_report = report[
-            report["Estado_seguimiento"].isin(["Vencido", "Vence hoy", "Próximo a vencer"])
-            | report["Estado_seguimiento"].str.startswith("Vence en", na=False)
-        ]
+        priority_report = report[report["Estado_seguimiento"].isin(["Vencido", "Vence hoy", "Próximo a vencer"])
+            | report["Estado_seguimiento"].str.startswith("Vence en", na=False)]
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             report.to_excel(writer, index=False, sheet_name="Base_consolidada")
@@ -739,6 +746,15 @@ with tab_export:
             cat_summary.to_excel(writer, index=False, sheet_name="Resumen_categoria")
             status_summary.to_excel(writer, index=False, sheet_name="Resumen_estado")
             project_summary.to_excel(writer, index=False, sheet_name="Resumen_proyecto")
+            # Dedicated sheets split by project and document category for easy operational follow-up.
+            for project_name, group in report.groupby("Proyecto", dropna=False):
+                sheet = ("P_" + str(project_name))[:31]
+                if sheet not in writer.book.sheetnames:
+                    group.to_excel(writer, index=False, sheet_name=sheet)
+            for category_name, group in report.groupby("Categoria", dropna=False):
+                sheet = ("T_" + str(category_name))[:31]
+                if sheet not in writer.book.sheetnames:
+                    group.to_excel(writer, index=False, sheet_name=sheet)
             if not all_sources.empty:
                 all_sources.to_excel(writer, index=False, sheet_name="Archivos_importados")
             # Add bar charts to the Excel workbook so the report includes visual summaries.
@@ -785,12 +801,12 @@ with tab_export:
                         ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 36)
 
         st.download_button(
-            "⬇️ Descargar informe ejecutivo Excel con gráficos",
+            "⬇️ Descargar Excel filtrado por estado, proyecto y tipo",
             data=output.getvalue(),
-            file_name=f"informe_corporativo_vencimientos_{today.isoformat()}.xlsx",
+            file_name=f"reporte_vencimientos_filtrado_{today.isoformat()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        st.caption("El Excel incluye la base consolidada, acciones prioritarias, resúmenes y gráficos de barras. Los gráficos del panel web responden a los filtros; los del Excel reflejan los datos incluidos al descargarlo.")
+        st.caption("El Excel incluye el detalle filtrado, resúmenes y hojas separadas por proyecto (P_) y tipo de documento (T_). Para obtener por separado vencidos o próximos a vencer, cambia el filtro Estado para descargar y vuelve a descargar.")
 
 st.divider()
 st.caption(
