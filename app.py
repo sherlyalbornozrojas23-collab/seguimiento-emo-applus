@@ -505,18 +505,20 @@ def project_expiry_summary(frame, threshold):
     if frame.empty:
         return pd.DataFrame(columns=[
             "Proyecto", "Total documentos", "Vencidos", "% vencidos",
-            "Vencen hoy", "Próximos a vencer", "% próximos a vencer"
+            "Vencen hoy", "Vence en 1 día", "Próximos a vencer", "% próximos a vencer"
         ])
     data = frame.copy()
     days = pd.to_numeric(data["Dias_restantes"], errors="coerce")
     data["_vencido"] = days < 0
     data["_hoy"] = days == 0
+    data["_un_dia"] = days == 1
     data["_proximo"] = days.gt(1) & days.le(threshold)
     summary = data.groupby("Proyecto", dropna=False).agg(
         **{
             "Total documentos": ("Proyecto", "size"),
             "Vencidos": ("_vencido", "sum"),
             "Vencen hoy": ("_hoy", "sum"),
+            "Vence en 1 día": ("_un_dia", "sum"),
             "Próximos a vencer": ("_proximo", "sum"),
         }
     ).reset_index()
@@ -652,7 +654,8 @@ with tab_dashboard:
             expired_total = int(summary["Vencidos"].sum())
             soon_total = int(summary["Próximos a vencer"].sum())
             due_today_total = int(summary["Vencen hoy"].sum())
-            m1, m2, m3, m4 = st.columns(4)
+            due_tomorrow_total = int(summary["Vence en 1 día"].sum())
+            m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Documentos filtrados", total_docs)
             m2.metric("Vencidos", expired_total, f"{(expired_total / total_docs * 100 if total_docs else 0):.1f}% del total")
             m3.metric("Próximos a vencer (30 días)", soon_total, f"{(soon_total / total_docs * 100 if total_docs else 0):.1f}% del total")
@@ -660,7 +663,7 @@ with tab_dashboard:
             m5.metric("Vencen hoy", due_today_total)
 
             chart_data = summary.melt(
-                id_vars="Proyecto", value_vars=["Vencidos", "Próximos a vencer"],
+                id_vars="Proyecto", value_vars=["Vencidos", "Vence en 1 día", "Próximos a vencer"],
                 var_name="Estado", value_name="Cantidad"
             )
             fig_project = px.bar(
