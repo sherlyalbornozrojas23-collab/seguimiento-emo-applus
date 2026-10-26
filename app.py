@@ -98,11 +98,12 @@ def find_column(columns, key):
             return col
     return None
 
-def infer_category(filename, columns):
-    text = norm(filename + " " + " ".join(map(str, columns)))
+def infer_category(filename, columns, sheet_name=""):
+    # Prioriza el nombre de la hoja para clasificar cada pestaña del Excel.
+    text = norm(str(sheet_name) + " " + filename + " " + " ".join(map(str, columns)))
     rules = [
-        (["emo", "examen medico", "examen ocupacional"], "EMO"),
-        (["licencia de conducir", "brevete", "licencia conducir"], "Licencia de conducir"),
+        (["emo", "examen medico", "examen ocupacional", "examen medico ocupacional"], "EMO"),
+        (["licencia de conducir", "licencias", "brevete", "licencia conducir"], "Licencia de conducir"),
         (["soat"], "SOAT"),
         (["rtv", "revision tecnica", "revisión técnica"], "RTV"),
         (["sctr"], "SCTR"),
@@ -335,7 +336,7 @@ with tab_upload:
                 frame = frame.copy()
                 frame.columns = [str(c).strip() for c in frame.columns]
                 cols = list(frame.columns)
-                inferred_category = infer_category(uploaded.name, cols)
+                inferred_category = infer_category(uploaded.name, cols, sheet_name)
                 with st.expander(f"Hoja: {sheet_name} · {len(frame)} filas · categoría sugerida: {inferred_category}", expanded=(len(sheets) == 1)):
                     st.dataframe(frame.head(8), use_container_width=True, hide_index=True)
                     st.caption("Confirma o ajusta las columnas antes de importar. Si una columna no aplica, selecciona «No disponible».")
@@ -658,23 +659,28 @@ with tab_records:
     if all_records.empty:
         st.info("No hay registros para mostrar.")
     else:
-        f1, f2, f3 = st.columns(3)
+        f1, f2, f3, f4 = st.columns(4)
         cat_options = options_for(all_records, "Categoria")
-        selected_cat = f1.selectbox("Categoría", cat_options)
+        selected_cat = f1.selectbox("Tipo de documento", cat_options, key="records_category")
         project_options = options_for(all_records, "Proyecto")
-        selected_project = f2.selectbox("Proyecto / área", project_options)
-        search = f3.text_input("Buscar por persona, placa, código, archivo o responsable").strip().lower()
+        selected_project = f2.selectbox("Proyecto / área", project_options, key="records_project")
+        status_options = options_for(all_records, "Estado_seguimiento")
+        selected_status = f3.selectbox("Estado de vencimiento", status_options, key="records_status")
+        search = f4.text_input("Buscar trabajador, DNI, placa o responsable", key="records_search").strip().lower()
         view = all_records.copy()
         if selected_cat != "Todos":
             view = view[view["Categoria"].astype(str) == selected_cat]
         if selected_project != "Todos":
             view = view[view["Proyecto"].astype(str) == selected_project]
+        if selected_status != "Todos":
+            view = view[view["Estado_seguimiento"].astype(str) == selected_status]
         if search:
-            search_cols = ["Persona_activo", "Identificador", "Archivo", "Responsable", "Tipo_control", "Proyecto"]
-            mask = False
+            search_cols = ["Persona_activo", "Identificador", "Archivo", "Responsable", "Tipo_control", "Proyecto", "Correo", "Hoja"]
+            mask = pd.Series(False, index=view.index)
             for col in search_cols:
-                mask = mask | view[col].astype(str).str.lower().str.contains(search, na=False)
+                mask = mask | view[col].astype(str).str.lower().str.contains(re.escape(search), na=False)
             view = view[mask]
+        st.caption(f"Registros encontrados: {len(view)}")
         display = view[[
             "Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador",
             "Fecha_emision", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento",
