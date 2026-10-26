@@ -629,6 +629,21 @@ with tab_dashboard:
         if dash.empty:
             st.warning("No hay registros para los filtros seleccionados.")
         else:
+            # Diagnóstico visible: ayuda a detectar si el problema está en la importación,
+            # en el mapeo de columnas o en las fechas antes de construir gráficos/tablas.
+            valid_due_count = int(pd.to_datetime(dash["Fecha_vencimiento"], errors="coerce").notna().sum())
+            st.caption(
+                f"Diagnóstico: {len(dash)} registros en el filtro · "
+                f"{valid_due_count} con fecha de vencimiento reconocida · "
+                f"{dash['Proyecto'].nunique(dropna=False)} proyectos · "
+                f"{dash['Categoria'].nunique(dropna=False)} categorías."
+            )
+            if valid_due_count == 0:
+                st.warning(
+                    "Hay registros, pero ninguna fecha de vencimiento válida. "
+                    "Al importar, selecciona explícitamente la columna que contiene la fecha de vencimiento "
+                    "y vuelve a pulsar «Importar hoja»."
+                )
             summary = project_expiry_summary(dash, threshold)
             total_docs = int(summary["Total documentos"].sum())
             expired_total = int(summary["Vencidos"].sum())
@@ -662,11 +677,25 @@ with tab_dashboard:
                 **{"Total documentos": ("Categoria", "size"), "Vencidos": ("_vencido", "sum"),
                    "Vencen hoy": ("_hoy", "sum"), "Próximos a vencer": ("_proximo", "sum")}
             ).reset_index().sort_values(["Vencidos", "Próximos a vencer", "Total documentos"], ascending=False)
-            st.dataframe(by_cat_project, use_container_width=True, hide_index=True)
-            cat_chart_data = by_cat_project.melt(id_vars=["Proyecto", "Categoria"], value_vars=["Vencidos", "Próximos a vencer"], var_name="Estado", value_name="Cantidad")
-            fig_cat_project = px.bar(cat_chart_data, x="Categoria", y="Cantidad", color="Estado", barmode="group", facet_col="Proyecto", facet_col_wrap=2, title="Vencidos y próximos a vencer por categoría y proyecto")
-            fig_cat_project.update_layout(height=max(380, 260 * max(1, by_cat_project["Proyecto"].nunique())), xaxis_title="Categoría", yaxis_title="Documentos", legend_title="")
-            st.plotly_chart(fig_cat_project, use_container_width=True, key="chart_category_project")
+            if by_cat_project.empty:
+                st.info("No hay combinaciones de proyecto y categoría para mostrar. Verifica la importación del Excel.")
+            else:
+                st.dataframe(by_cat_project, use_container_width=True, hide_index=True)
+                cat_chart_data = by_cat_project.melt(
+                    id_vars=["Proyecto", "Categoria"],
+                    value_vars=["Vencidos", "Próximos a vencer"],
+                    var_name="Estado", value_name="Cantidad"
+                )
+                fig_cat_project = px.bar(
+                    cat_chart_data, x="Categoria", y="Cantidad", color="Estado",
+                    barmode="group", facet_col="Proyecto", facet_col_wrap=2,
+                    title="Vencidos y próximos a vencer por categoría y proyecto"
+                )
+                fig_cat_project.update_layout(
+                    height=max(380, 260 * max(1, by_cat_project["Proyecto"].nunique())),
+                    xaxis_title="Categoría", yaxis_title="Documentos", legend_title=""
+                )
+                st.plotly_chart(fig_cat_project, use_container_width=True, key="chart_category_project")
 
             with st.expander("Ver detalle de registros filtrados"):
                 detail_display = dash[[
