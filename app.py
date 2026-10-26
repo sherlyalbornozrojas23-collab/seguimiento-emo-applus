@@ -430,8 +430,48 @@ with db_connect() as conn:
     all_sources = pd.read_sql_query("SELECT * FROM sources ORDER BY imported_at DESC", conn)
 
 if not all_records.empty:
-    all_records["Fecha_vencimiento"] = pd.to_datetime(all_records["due_date"], errors="coerce").dt.date
-    all_records["Fecha_emision"] = pd.to_datetime(all_records["issue_date"], errors="coerce").dt.date
+    # Recupera campos desde el JSON original cuando una importación anterior
+    # guardó filas pero no mapeó correctamente proyecto, categoría o vencimiento.
+    def recover_raw_fields(record):
+        try:
+            raw = json.loads(record.get("raw_json") or "{}")
+        except Exception:
+            raw = {}
+        normalized = {norm(k): v for k, v in raw.items()}
+        def pick(keys):
+            for key in keys:
+                value = normalized.get(norm(key))
+                if value is not None and str(value).strip() and str(value).strip().lower() != "nan":
+                    return value
+            # Permite encabezados como Fecha de vencimiento (documento)
+            for key, value in normalized.items():
+                if any(norm(alias) in key for alias in keys) and value is not None and str(value).strip():
+                    return value
+            return None
+        project = record.get("project")
+        if project is None or not str(project).strip() or str(project).strip().lower() in ("nan", "none"):
+            project = pick(["proyecto", "project", "obra", "servicio"])
+        due = record.get("due_date")
+        if due is None or not str(due).strip() or str(due).strip().lower() in ("nan", "none"):
+            due = pick(["fecha vencimiento", "fecha de vencimiento", "vencimiento", "vigencia hasta", "fecha caducidad", "fecha de caducidad", "fecha fin"])
+        category = record.get("category")
+        if category is None or not str(category).strip() or norm(category) == "otro":
+            category = infer_category(str(record.get("source_file", "")), list(raw.keys()), str(record.get("source_sheet", "")))
+        return pd.Series({"project_recovered": project, "due_recovered": due, "category_recovered": category})
+
+    recovered = all_records.apply(recover_raw_fields, axis=1)
+    all_records["project"] = all_records["project"].where(
+        all_records["project"].fillna("").astype(str).str.strip().ne(""), recovered["project_recovered"]
+    )
+    all_records["due_date"] = all_records["due_date"].where(
+        all_records["due_date"].fillna("").astype(str).str.strip().ne(""), recovered["due_recovered"]
+    )
+    all_records["category"] = all_records["category"].where(
+        all_records["category"].fillna("").astype(str).str.strip().ne("") & all_records["category"].fillna("").astype(str).map(norm).ne("otro"),
+        recovered["category_recovered"]
+    )
+    all_records["Fecha_vencimiento"] = pd.to_datetime(all_records["due_date"], errors="coerce", dayfirst=True).dt.date
+    all_records["Fecha_emision"] = pd.to_datetime(all_records["issue_date"], errors="coerce", dayfirst=True).dt.date
     all_records["Dias_restantes"] = all_records["Fecha_vencimiento"].apply(
         lambda d: (d - today).days if pd.notna(d) else None
     )
