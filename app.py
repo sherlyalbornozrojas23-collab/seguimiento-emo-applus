@@ -248,12 +248,10 @@ def db_connect():
     conn.commit()
     return conn
 
-@st.cache_data(ttl=60, show_spinner=False)
 def load_records():
     with db_connect() as conn:
         return pd.read_sql_query("SELECT * FROM records ORDER BY source_file, source_sheet, source_row", conn)
 
-@st.cache_data(ttl=60, show_spinner=False)
 def load_sources():
     with db_connect() as conn:
         return pd.read_sql_query("SELECT * FROM sources ORDER BY imported_at DESC", conn)
@@ -313,8 +311,16 @@ def import_sheet(
             INSERT INTO sources (source_key, source_file, source_hash, uploaded_by, sheets, imported_at)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (source_key, source_file, content_hash, uploader, sheet_name, now))
+        # Verificar el reemplazo dentro de la misma transacción.
+        active_count = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+        source_count = conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
+        if active_count != len(records) or source_count != 1:
+            raise RuntimeError(
+                f"Reemplazo inconsistente: {active_count} registros, "
+                f"{source_count} fuentes; se conservará la base anterior."
+            )
         conn.commit()
-    return len(records)
+    return active_count
 
 def due_or_date(value):
     return value is not None and not pd.isna(value)
@@ -419,7 +425,11 @@ else:
 # Diagnóstico temporal para identificar en qué etapa se pierden los datos.
 # Está dentro de un expander para no recargar el panel ejecutivo.
 with st.expander("🔎 Diagnóstico de datos (abrir si los gráficos aparecen vacíos)", expanded=False):
+    st.write("Ruta de SQLite:", str(DB_PATH.resolve()))
     st.write("Registros cargados desde SQLite:", len(db_records))
+    with db_connect() as diagnostic_conn:
+        st.write("Conteo directo en SQLite:", diagnostic_conn.execute("SELECT COUNT(*) FROM records").fetchone()[0])
+        st.write("Fuentes activas:", diagnostic_conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0])
     st.write("Registros preparados para el dashboard:", len(all_records))
     if not db_records.empty:
         diagnostic_columns = [c for c in ["project", "due_date", "issue_date", "source_file", "source_sheet"] if c in db_records.columns]
@@ -446,6 +456,9 @@ with st.expander("🔎 Diagnóstico de datos (abrir si los gráficos aparecen va
         st.write(f"Fechas de vencimiento no interpretadas: {invalid_dates} de {len(all_records)}")
     else:
         st.warning("No hay registros consolidados en esta base SQLite. Si ya habías importado un archivo, puede que Streamlit Cloud esté usando una base local distinta o que la importación no se haya completado.")
+
+if st.session_state.get("ultima_importacion"):
+    st.success(st.session_state.pop("ultima_importacion"))
 
 tab_dashboard, tab_export = st.tabs(["📊 Panel general", "📤 Reportes"])
 
@@ -615,10 +628,11 @@ with tab_dashboard:
                             except Exception as import_exc:
                                 st.error(f"No se reemplazó la base: {import_exc}")
                             else:
-                                load_records.clear()
-                                load_sources.clear()
-                                st.cache_data.clear()
-                                st.success(f"Base reemplazada: {count} filas activas de {saved_name} · {sheet_name}. El archivo original se conservó en data/originales.")
+                                # Lecturas directas a SQLite: sin caché que pueda conservar filas antiguas.
+                                st.session_state["ultima_importacion"] = (
+                                    f"Base reemplazada y verificada: {count} filas activas "
+                                    f"de {saved_name} · {sheet_name}."
+                                )
                                 st.rerun()
             except Exception as exc:
                 st.error("No se pudo leer el archivo. Verifica que esté en formato Excel o CSV y que no esté dañado.")
