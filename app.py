@@ -247,10 +247,12 @@ def db_connect():
     conn.commit()
     return conn
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_records():
     with db_connect() as conn:
         return pd.read_sql_query("SELECT * FROM records ORDER BY source_file, source_sheet, source_row", conn)
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_sources():
     with db_connect() as conn:
         return pd.read_sql_query("SELECT * FROM sources ORDER BY imported_at DESC", conn)
@@ -349,7 +351,7 @@ st.markdown("""
 div.stButton > button, div.stDownloadButton > button {border-radius:8px; font-weight:600;}
 </style>
 <div class="applus-hero"><h1>APPLUS+ | Control documental</h1><p>Seguimiento de EMO, vencimientos y cumplimiento por proyecto</p></div>
-""")
+""", unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("Configuración")
@@ -559,11 +561,31 @@ with tab_dashboard:
                             st.error("No se importó el archivo: falta asignar la fecha de vencimiento.")
                         else:
                             def mapped(value): return None if value == "(No asignar)" else value
-                            file_hash = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
-                            saved_name = re.sub(r"[^A-Za-z0-9._ -]", "_", uploaded_file.name)
-                            count = import_sheet(saved_name, sheet_name, upload_df, file_hash, "Usuario de la aplicación", up_category, mapped(up_due), mapped(up_issue), mapped(up_project), mapped(up_person), mapped(up_identifier), mapped(up_responsible), mapped(up_email), mapped(up_type), mapped(up_status))
-                            st.success(f"Importación completada: {count} filas incorporadas desde {saved_name} · {sheet_name}.")
-                            st.rerun()
+                            file_bytes = uploaded_file.getvalue()
+                            file_hash = hashlib.sha256(file_bytes).hexdigest()
+                            saved_name = re.sub(r"[^A-Za-z0-9._ -]", "_", uploaded_file.name).strip() or "archivo_importado"
+                            # Conservar una copia exacta del archivo original, identificada por hash.
+                            # Así no se sobrescribe otro archivo con el mismo nombre.
+                            suffix = Path(saved_name).suffix
+                            stem = Path(saved_name).stem
+                            original_path = ORIGINALS_DIR / f"{stem}_{file_hash[:12]}{suffix}"
+                            if not original_path.exists():
+                                with open(original_path, "wb") as original_file:
+                                    original_file.write(file_bytes)
+                            # Evitar duplicar la misma fuente si se vuelve a cargar con otro nombre.
+                            with db_connect() as conn:
+                                duplicate = conn.execute(
+                                    "SELECT source_file FROM sources WHERE source_hash = ? LIMIT 1",
+                                    (file_hash,)
+                                ).fetchone()
+                            if duplicate and duplicate[0] != saved_name:
+                                st.warning(f"Este archivo ya fue importado como {duplicate[0]}. No se duplicaron los registros.")
+                            else:
+                                count = import_sheet(saved_name, sheet_name, upload_df, file_hash, "Usuario de la aplicación", up_category, mapped(up_due), mapped(up_issue), mapped(up_project), mapped(up_person), mapped(up_identifier), mapped(up_responsible), mapped(up_email), mapped(up_type), mapped(up_status))
+                                load_records.clear()
+                                load_sources.clear()
+                                st.success(f"Importación completada: {count} filas incorporadas desde {saved_name} · {sheet_name}. El archivo original se conservó en data/originales.")
+                                st.rerun()
             except Exception as exc:
                 st.error("No se pudo leer el archivo. Verifica que esté en formato Excel o CSV y que no esté dañado.")
                 st.caption(f"Detalle técnico: {type(exc).__name__}")
@@ -605,6 +627,31 @@ with tab_dashboard:
                 id_vars="Proyecto", value_vars=["Vencidos", "Próximos a vencer"],
                 var_name="Estado", value_name="Cantidad"
             )
+            # Resumen ejecutivo: distribución de estados y ranking de proyectos críticos.
+            status_counts = dash["Estado_seguimiento"].fillna("Sin estado").astype(str).value_counts().reset_index()
+            status_counts.columns = ["Estado", "Cantidad"]
+            fig_status = px.pie(
+                status_counts, names="Estado", values="Cantidad", hole=0.62,
+                title="Distribución de estados documentales"
+            )
+            fig_status.update_layout(height=320, margin=dict(l=10, r=10, t=55, b=10), legend_title="")
+            fig_status.update_traces(textposition="inside", textinfo="percent+label")
+            critical = summary.sort_values(["Vencidos", "Próximos a vencer"], ascending=False).head(10)
+            fig_critical = px.bar(
+                critical, x="Vencidos", y="Proyecto", orientation="h",
+                title="Proyectos con mayor cantidad de documentos vencidos",
+                text="Vencidos", hover_data=["Próximos a vencer", "Total documentos", "% cumplimiento"]
+            )
+            fig_critical.update_layout(height=max(300, min(520, 38 * len(critical) + 100)),
+                                       yaxis={"categoryorder": "total ascending"},
+                                       margin=dict(l=10, r=20, t=55, b=15))
+            fig_critical.update_traces(textposition="outside", cliponaxis=False)
+            chart_left, chart_right = st.columns(2)
+            with chart_left:
+                st.plotly_chart(fig_status, use_container_width=True, key="chart_document_status_donut")
+            with chart_right:
+                st.plotly_chart(fig_critical, use_container_width=True, key="chart_critical_projects")
+
             fig_project = px.bar(
                 chart_data, y="Proyecto", x="Cantidad", color="Estado", barmode="group",
                 text="Cantidad", orientation="h", title="Cantidad de vencidos y próximos a vencer por proyecto",
