@@ -99,22 +99,25 @@ def find_column(columns, key):
             return col
     return None
 
+CATEGORIES = ["EMO", "Licencia de conducir", "SOAT", "RTV", "SCTR", "Seguro vehicular", "Contrato", "Mantenimiento", "Calibración", "Certificado / permiso", "Otro"]
+
 def infer_category(filename, columns):
-    text = norm(filename + " " + " ".join(map(str, columns)))
+    """Categoriza por términos específicos en el archivo y sus encabezados."""
+    text = norm(str(filename) + " " + " ".join(map(str, columns)))
     rules = [
-        (["emo", "examen medico", "examen ocupacional"], "EMO"),
-        (["licencia de conducir", "brevete", "licencia conducir"], "Licencia de conducir"),
-        (["soat"], "SOAT"),
-        (["rtv", "revision tecnica", "revisión técnica"], "RTV"),
-        (["sctr"], "SCTR"),
-        (["seguro vehicular", "poliza vehicular", "póliza vehicular"], "Seguro vehicular"),
-        (["contrato", "fecha fin contrato"], "Contrato"),
-        (["calibracion", "calibración"], "Calibración"),
-        (["mantenimiento", "proximo servicio", "próximo servicio"], "Mantenimiento"),
-        (["certificado", "permiso", "autorizacion", "autorización"], "Certificado / permiso"),
+        ("EMO", ["emo", "examen medico", "examen ocupacional", "medico ocupacional", "aptitud medica"]),
+        ("Licencia de conducir", ["licencia de conducir", "licencia conductor", "licencia conducir", "brevete"]),
+        ("SOAT", ["soat", "seguro obligatorio"]),
+        ("RTV", ["rtv", "revision tecnica vehicular", "revision tecnica"]),
+        ("SCTR", ["sctr", "seguro complementario de trabajo de riesgo"]),
+        ("Seguro vehicular", ["seguro vehicular", "poliza vehicular"]),
+        ("Contrato", ["contrato", "fecha fin contrato", "vigencia contrato", "renovacion contrato"]),
+        ("Mantenimiento", ["mantenimiento", "preventivo", "correctivo", "proximo servicio"]),
+        ("Calibración", ["calibracion", "certificado calibracion"]),
+        ("Certificado / permiso", ["certificado", "permiso", "autorizacion"]),
     ]
-    for needles, category in rules:
-        if any(norm(n) in text for n in needles):
+    for category, keywords in rules:
+        if any(norm(keyword) in text for keyword in keywords):
             return category
     return "Otro"
 
@@ -642,7 +645,7 @@ with tab_dashboard:
         st.info("Aún no hay registros consolidados. No hay registros en la base de datos configurada. Los datos deben estar cargados previamente en el almacenamiento de la aplicación.")
     else:
         threshold = max(warning_days or [30])
-        st.caption(f"Próximos a vencer: documentos que vencen dentro de los próximos {threshold} días. Los porcentajes se calculan sobre el total de registros de cada proyecto.")
+        st.caption(f"Próximos a vencer: documentos que vencen en los próximos {threshold} días, sin incluir los que vencen hoy.")
         fc1, fc2 = st.columns(2)
         dash_categories = options_for(all_records, "Categoria")
         dash_category = fc1.selectbox("Categoría", dash_categories, key="dash_category")
@@ -664,75 +667,37 @@ with tab_dashboard:
             soon_total = int(summary["Próximos a vencer"].sum())
             due_today_total = int(summary["Vencen hoy"].sum())
             valid_days = pd.to_numeric(dash["Dias_restantes"], errors="coerce")
-            valid_mask = valid_days.notna()
-            compliance = float((valid_days[valid_mask] > threshold).sum() / valid_mask.sum() * 100) if valid_mask.any() else 0.0
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Total documentos", total_docs)
-            m2.metric("Cumplimiento", f"{compliance:.1f}%")
-            m3.metric("Vencidos", expired_total, f"{(expired_total / total_docs * 100 if total_docs else 0):.1f}% del total")
-            m4.metric("Próximos a vencer", soon_total)
-            m5.metric("Vencen hoy", due_today_total)
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Total documentos", total_docs)
+            k2.metric("🚨 Vencidos", expired_total)
+            k3.metric(f"⚠️ Próximos ({threshold} días)", soon_total)
+            k4.metric("📅 Vencen hoy", due_today_total)
+            st.caption(f"Vigentes fuera de alerta: {int((valid_days > threshold).sum())} · Sin fecha válida: {int(valid_days.isna().sum())}")
 
-            left_visual, right_visual = st.columns(2)
-            with left_visual:
-                gauge = go.Figure(go.Indicator(
-                    mode="gauge+number", value=compliance,
-                    number={"suffix": "%", "font": {"color": "#173B57"}},
-                    title={"text": "Cumplimiento documental"},
-                    gauge={"axis": {"range": [0, 100]}, "bar": {"color": "#245B7A"},
-                           "steps": [{"range": [0, 60], "color": "#F9D7D9"},
-                                     {"range": [60, 85], "color": "#FFF0BF"},
-                                     {"range": [85, 100], "color": "#D7F0DE"}]}
-                ))
-                gauge.update_layout(height=280, margin=dict(l=15, r=15, t=55, b=15))
-                st.plotly_chart(gauge, use_container_width=True, key="compliance_gauge")
-            with right_visual:
-                status_counts = pd.DataFrame({
-                    "Estado": ["Vencido", "Vence hoy", "Próximo a vencer", "Vigente", "Sin fecha válida"],
-                    "Documentos": [expired_total, due_today_total, soon_total,
-                                   int((valid_days > threshold).sum()), int((~valid_mask).sum())]
-                })
-                status_counts = status_counts[status_counts["Documentos"] > 0]
-                donut = px.pie(status_counts, names="Estado", values="Documentos", hole=0.65,
-                               title="Distribución documental", color="Estado",
-                               color_discrete_map={"Vencido": "#C53030", "Vence hoy": "#E37D27",
-                                                   "Próximo a vencer": "#E8BC48", "Vigente": "#27855D",
-                                                   "Sin fecha válida": "#8394A4"})
-                donut.update_layout(height=280, margin=dict(l=10, r=10, t=55, b=15))
-                st.plotly_chart(donut, use_container_width=True, key="document_status_donut")
+            by_type = dash.groupby("Categoria", dropna=False).size().reset_index(name="Cantidad")
+            by_type["Categoria"] = by_type["Categoria"].fillna("Otro")
+            st.markdown("#### Documentos por tipo")
+            fig_all = px.bar(by_type.sort_values("Cantidad", ascending=False), x="Categoria", y="Cantidad",
+                             text="Cantidad", color_discrete_sequence=["#245B7A"])
+            fig_all.update_layout(height=350, xaxis_title="", yaxis_title="Documentos")
+            st.plotly_chart(fig_all, use_container_width=True, key="count_by_category")
 
-            # Gráfico 1: porcentaje de documentos vencidos por proyecto.
-            project_chart = summary.copy()
-            project_chart["% vencidos"] = pd.to_numeric(project_chart["% vencidos"], errors="coerce").fillna(0)
-            fig_project = px.bar(
-                project_chart.sort_values("% vencidos"),
-                x="% vencidos", y="Proyecto", orientation="h", text="% vencidos",
-                color="% vencidos", color_continuous_scale="Reds",
-                title="% de documentos vencidos por proyecto"
-            )
-            fig_project.update_traces(texttemplate="%{text:.1f}%", textposition="outside", cliponaxis=False)
-            fig_project.update_layout(height=500, xaxis_title="% vencidos", yaxis_title="", coloraxis_colorbar_title="% vencidos",
-                                      margin=dict(l=10, r=30, t=60, b=20))
-            st.plotly_chart(fig_project, use_container_width=True, key="chart_expired_percentage_project")
-
-            # Gráfico 2: porcentaje de documentos vencidos por categoría.
-            cat_total = dash.groupby("Categoria", dropna=False).size().reset_index(name="Total")
-            cat_expired = (
-                dash[dash["Estado_seguimiento"].astype(str) == "Vencido"]
-                .groupby("Categoria", dropna=False).size().reset_index(name="Vencidos")
-            )
-            cat_chart = cat_total.merge(cat_expired, on="Categoria", how="left")
-            cat_chart["Vencidos"] = cat_chart["Vencidos"].fillna(0)
-            cat_chart["Porcentaje"] = (cat_chart["Vencidos"] / cat_chart["Total"].replace(0, pd.NA) * 100).fillna(0).round(1)
-            fig_cat = px.bar(
-                cat_chart.sort_values("Porcentaje", ascending=False), x="Categoria", y="Porcentaje",
-                text="Porcentaje", color="Porcentaje", color_continuous_scale="Oranges",
-                title="% de documentos vencidos por categoría"
-            )
-            fig_cat.update_traces(texttemplate="%{text:.1f}%", textposition="outside", cliponaxis=False)
-            fig_cat.update_layout(height=500, xaxis_title="Categoría", yaxis_title="% vencidos",
-                                  showlegend=False, margin=dict(l=10, r=20, t=60, b=25))
-            st.plotly_chart(fig_cat, use_container_width=True, key="chart_expired_percentage_category")
+            left, right = st.columns(2)
+            for target, mask, title, color, chart_key in [
+                (left, valid_days < 0, "Vencidos por tipo", "#B42318", "expired_category"),
+                (right, (valid_days > 0) & (valid_days <= threshold), "Próximos a vencer por tipo", "#D6A323", "soon_category")
+            ]:
+                with target:
+                    st.markdown(f"#### {title}")
+                    counts = dash.loc[mask].groupby("Categoria", dropna=False).size().reset_index(name="Cantidad")
+                    if counts.empty:
+                        st.info("Sin documentos en esta condición.")
+                    else:
+                        counts["Categoria"] = counts["Categoria"].fillna("Otro")
+                        fig = px.bar(counts.sort_values("Cantidad"), x="Cantidad", y="Categoria",
+                                     orientation="h", text="Cantidad", color_discrete_sequence=[color])
+                        fig.update_layout(height=350, xaxis_title="Documentos", yaxis_title="")
+                        st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
             st.markdown("#### Resumen por proyecto")
             summary_display = summary.copy()
@@ -747,14 +712,32 @@ with tab_dashboard:
                 ("🟡 Próximo a vencer" if r["Próximos a vencer"] > 0 or r["Vencen hoy"] > 0 else "🟢 Vigente"), axis=1)
             st.dataframe(critical[["Proyecto", "Total documentos", "Vencidos", "Vencen hoy", "Próximos a vencer", "Semáforo"]],
                          use_container_width=True, hide_index=True)
-            st.markdown("#### Mapa de calor de riesgos")
-            heat = summary.head(20).set_index("Proyecto")[["Vencidos", "Vencen hoy", "Próximos a vencer"]]
-            if not heat.empty:
-                heat_fig = px.imshow(heat, aspect="auto", text_auto=True, color_continuous_scale="YlOrRd",
-                                     labels={"x": "Riesgo", "y": "Proyecto", "color": "Documentos"})
-                heat_fig.update_layout(height=max(300, min(700, len(heat) * 33 + 100)),
-                                       margin=dict(l=10, r=15, t=30, b=20))
-                st.plotly_chart(heat_fig, use_container_width=True, key="project_risk_heatmap")
+            st.markdown("#### Mapa de calor: proyecto vs. documento")
+            heat_data = dash.copy()
+            heat_data["Proyecto"] = heat_data["Proyecto"].fillna("Proyecto sin identificar")
+            heat_data["Categoria"] = heat_data["Categoria"].fillna("Otro")
+            heat_data["Nivel"] = 0  # 0 vigente, 1 alerta, 2 vencido, 3 fecha faltante
+            heat_data.loc[(valid_days >= 0) & (valid_days <= threshold), "Nivel"] = 1
+            heat_data.loc[valid_days < 0, "Nivel"] = 2
+            heat_data.loc[valid_days.isna(), "Nivel"] = 3
+            matrix = heat_data.pivot_table(index="Proyecto", columns="Categoria", values="Nivel", aggfunc="max")
+            ordered = summary.sort_values(["Vencidos", "Próximos a vencer"], ascending=False)["Proyecto"].head(20)
+            matrix = matrix.reindex([p for p in ordered if p in matrix.index])
+            if not matrix.empty:
+                # Ausencia de documentos en la combinación se muestra como gris, no como vigente.
+                z = matrix.fillna(4).values
+                fig_heat = go.Figure(go.Heatmap(
+                    z=z, x=matrix.columns.tolist(), y=matrix.index.tolist(), zmin=0, zmax=4,
+                    colorscale=[[0,"#27855D"],[0.24,"#27855D"],[0.25,"#E8BC48"],
+                                [0.49,"#E8BC48"],[0.5,"#B42318"],[0.74,"#B42318"],
+                                [0.75,"#8394A4"],[1,"#D9DEE5"]],
+                    colorbar=dict(tickvals=[0,1,2,3,4], ticktext=["Vigente","Alerta","Vencido","Sin fecha","No aplica"]),
+                    hovertemplate="Proyecto: %{y}<br>Tipo: %{x}<br>Nivel: %{z}<extra></extra>"
+                ))
+                fig_heat.update_layout(height=max(340, min(850, 38*len(matrix)+130)),
+                                       xaxis_title="Tipo de documento", yaxis_title="Proyecto")
+                st.plotly_chart(fig_heat, use_container_width=True, key="heat_project_document")
+            st.caption("Se muestra el estado más crítico de cada combinación. Gris: fecha no válida o documento no registrado.")
 
 
 
