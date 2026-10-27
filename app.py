@@ -18,7 +18,7 @@ from io import BytesIO
 st.set_page_config(
     page_title="Control corporativo de vencimientos | Applus+",
     page_icon="📅",
-    layout="wide"
+    layout="wide",
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -119,18 +119,31 @@ def infer_category(filename, columns):
 
 
 def read_workbook(uploaded_file):
+    if uploaded_file is None:
+        raise ValueError("No se recibió ningún archivo.")
+
     name = uploaded_file.name
     content = uploaded_file.getvalue()
     if name.lower().endswith(".csv"):
+        for enc in ("utf-8-sig", "latin-1", "cp1252"):
+            try:
+                return {"CSV": pd.read_csv(BytesIO(content), dtype=str, keep_default_na=False, encoding=enc)}
+            except Exception:
+                continue
+        raise ValueError(f"No se pudo leer el CSV '{name}'. Verifica que esté en formato UTF-8 o Latin-1.")
+
+    try:
+        excel = pd.ExcelFile(BytesIO(content))
+    except Exception as exc:
+        raise ValueError(f"No se pudo abrir el archivo Excel '{name}'. Detalle: {exc}") from exc
+
+    sheets = {}
+    for sheet in excel.sheet_names:
         try:
-            return {"CSV": pd.read_csv(BytesIO(content), dtype=str, keep_default_na=False)}
-        except UnicodeDecodeError:
-            return {"CSV": pd.read_csv(BytesIO(content), dtype=str, keep_default_na=False, encoding="latin-1")}
-    excel = pd.ExcelFile(BytesIO(content))
-    return {
-        sheet: pd.read_excel(BytesIO(content), sheet_name=sheet, dtype=object)
-        for sheet in excel.sheet_names
-    }
+            sheets[sheet] = pd.read_excel(BytesIO(content), sheet_name=sheet, dtype=object)
+        except Exception as exc:
+            raise ValueError(f"La hoja '{sheet}' no se pudo leer: {exc}") from exc
+    return sheets
 
 
 def safe_json_value(value):
@@ -245,13 +258,19 @@ def db_connect():
 
 
 def load_records():
-    with db_connect() as conn:
-        return pd.read_sql_query("SELECT * FROM records ORDER BY source_file, source_sheet, source_row", conn)
+    try:
+        with db_connect() as conn:
+            return pd.read_sql_query("SELECT * FROM records ORDER BY source_file, source_sheet, source_row", conn)
+    except Exception:
+        return pd.DataFrame()
 
 
 def load_sources():
-    with db_connect() as conn:
-        return pd.read_sql_query("SELECT * FROM sources ORDER BY imported_at DESC", conn)
+    try:
+        with db_connect() as conn:
+            return pd.read_sql_query("SELECT * FROM sources ORDER BY imported_at DESC", conn)
+    except Exception:
+        return pd.DataFrame()
 
 
 def import_sheet(
@@ -332,31 +351,98 @@ def calc_status(value, today, thresholds):
     return "Vigente según fecha"
 
 
-def options_for(df, column, include_all=True):
+def opciones_por_columna(df, column, include_all=True):
     if df is None or column not in df.columns:
         return ["Todos"] if include_all else []
     values = sorted([str(x) for x in df[column].dropna().unique() if str(x).strip()])
     return (["Todos"] + values) if include_all else values
 
 
-with st.sidebar:
-    st.header("Configuración")
-    today = st.date_input("Fecha de evaluación", value=date.today())
-    warning_days = st.multiselect("Anticipación de alertas (días)", [1, 7, 15], default=[1, 7, 15], help="Selecciona los avisos que deseas considerar: 1, 7 y/o 15 días antes del vencimiento.")
-    st.caption("Las alertas se calculan por fecha. El sistema no valida aptitud médica ni renueva documentos.")
-    st.divider()
-    st.caption("La base consolidada se guarda en la carpeta `data`. En alojamientos con disco efímero, configura almacenamiento persistente antes del uso compartido real.")
+def validar_archivo(frame, filename):
+    errores = []
+    advertencias = []
+    if frame is None:
+        errores.append("El DataFrame recibido es nulo.")
+        return {"coincidencias": {}, "faltantes": [], "errores": errores, "advertencias": advertencias}
+
+    columns = [str(c).strip() for c in frame.columns]
+    if len(columns) == 0:
+        errores.append("El archivo no tiene columnas.")
+
+    duplicate_cols = [c for c in set(columns) if columns.count(c) > 1]
+    if duplicate_cols:
+        advertencias.append(f"Columnas duplicadas detectadas: {duplicate_cols[:5]}")
+
+    coincidencias = {}
+    for key in ALIASES:
+        matched = find_column(columns, key)
+        coincidencias[key] = matched
+
+    faltantes = [key for key, value in coincidencias.items() if value is None]
+    if faltantes:
+        advertencias.append(f"No se detectaron columnas para: {faltantes}")
+
+    if frame.empty:
+        errores.append("El archivo cargado está vacío.")
+
+    file_hint = infer_category(filename, columns)
+    if file_hint:
+        advertencias.append(f"Categoría inferida por nombre: {file_hint}")
+
+    return {
+        "coincidencias": coincidencias,
+        "faltantes": faltantes,
+        "errores": errores,
+        "advertencias": advertencias,
+    }
+
+
+def diagnosticar_archivo(uploaded_file):
+    try:
+        sheets = read_workbook(uploaded_file)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "nombre": getattr(uploaded_file, "name", "Sin nombre"),
+            "mensaje": str(exc),
+            "hojas": [],
+            "tipos": {},
+            "validacion": {"coincidencias": {}, "faltantes": [], "errores": [str(exc)], "advertencias": []},
+        }
+
+    resumen = {
+        "ok": True,
+        "nombre": getattr(uploaded_file, "name", "Sin nombre"),
+        "mensaje": "Archivo leído correctamente.",
+        "hojas": list(sheets.keys()),
+        "tipos": {},
+        "validacion": {"coincidencias": {}, "faltantes": [], "errores": [], "advertencias": []},
+    }
+
+    for nombre_hoja, frame in sheets.items():
+        resumen["tipos"][nombre_hoja] = {
+            "filas": int(len(frame)),
+            "columnas": list(frame.columns[:20]),
+            "n_columnas": len(frame.columns),
+        }
+        result = validar_archivo(frame, nombre_hoja)
+        resumen["validacion"]["coincidencias"].update({f"{nombre_hoja}:{k}": v for k, v in result["coincidencias"].items()})
+        resumen["validacion"]["faltantes"].extend([f"{nombre_hoja}:{x}" for x in result["faltantes"]])
+        resumen["validacion"]["errores"].extend([f"{nombre_hoja}: {err}" for err in result["errores"]])
+        resumen["validacion"]["advertencias"].extend([f"{nombre_hoja}: {warn}" for warn in result["advertencias"]])
+
+    resumen["ok"] = len(resumen["validacion"]["errores"]) == 0
+    return resumen
 
 
 def normalize_records(frame, reference_date):
     df = frame.copy() if frame is not None else pd.DataFrame()
-    required_columns = [
+    for col in [
         "Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador",
         "Fecha_emision", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento",
         "Responsable", "Correo", "Archivo", "Hoja", "source_row", "uploaded_by",
         "source_file", "source_sheet", "source_status"
-    ]
-    for col in required_columns:
+    ]:
         if col not in df.columns:
             df[col] = pd.NA
 
@@ -386,31 +472,61 @@ def normalize_records(frame, reference_date):
         df["source_row"] = df["source_row"].fillna(0).astype(int)
     if "uploaded_by" in df.columns:
         df["uploaded_by"] = df["uploaded_by"].fillna("Sistema")
-    if "source_status" in df.columns:
-        df["Estado_seguimiento"] = df["source_status"].fillna("Fecha por revisar")
-    else:
+
+    if "Estado_seguimiento" not in df.columns:
         df["Estado_seguimiento"] = "Fecha por revisar"
 
     if "Fecha_vencimiento" in df.columns:
         df["Dias_restantes"] = (pd.to_datetime(df["Fecha_vencimiento"], errors="coerce") - pd.Timestamp(reference_date)).dt.days
         df["Estado_seguimiento"] = df.apply(
-            lambda row: calc_status(row["Fecha_vencimiento"], reference_date, [1, 7, 15])
-            if pd.notna(row["Fecha_vencimiento"]) else "Fecha por revisar",
+            lambda row: calc_status(row["Fecha_vencimiento"], reference_date, [1, 7, 15]) if pd.notna(row["Fecha_vencimiento"]) else "Fecha por revisar",
             axis=1,
         )
 
     for col in ["Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador", "Responsable", "Correo", "Archivo", "Hoja"]:
-        df[col] = df[col].fillna("Sin dato").astype(str)
+        if col in df.columns:
+            df[col] = df[col].fillna("Sin dato").astype(str)
 
     df["Dias_restantes"] = pd.to_numeric(df["Dias_restantes"], errors="coerce").fillna(0)
     return df
 
 
-all_records = normalize_records(load_records(), today)
+# Carga inicial segura.
+all_records = normalize_records(load_records(), date.today())
 all_sources = load_sources()
 
 st.title("📅 Sistema corporativo de seguimiento de vencimientos")
 st.caption("Plataforma para consolidar vencimientos de distintas bases Excel, sin exigir una plantilla única ni modificar los archivos originales.")
+
+with st.sidebar:
+    st.header("Configuración")
+    today = st.date_input("Fecha de evaluación", value=date.today())
+    warning_days = st.multiselect("Anticipación de alertas (días)", [1, 7, 15], default=[1, 7, 15], help="Selecciona los avisos que deseas considerar: 1, 7 y/o 15 días antes del vencimiento.")
+    st.caption("Las alertas se calculan por fecha. El sistema no valida aptitud médica ni renueva documentos.")
+    st.divider()
+
+    uploaded_file = st.file_uploader(
+        "Cargar archivo Excel/CSV",
+        type=["xlsx", "xls", "csv"],
+        help="Sube un archivo Excel (.xlsx/.xls) o CSV para validarlo y revisarlo antes de importarlo."
+    )
+    if uploaded_file is not None:
+        st.success(f"Archivo cargado: {uploaded_file.name}")
+        diagnostico = diagnosticar_archivo(uploaded_file)
+        st.markdown("#### Diagnóstico")
+        st.json({
+            "nombre": diagnostico["nombre"],
+            "estado": "OK" if diagnostico["ok"] else "ERROR",
+            "mensaje": diagnostico["mensaje"],
+            "hojas": diagnostico["hojas"],
+            "validacion": diagnostico["validacion"],
+        })
+        if not diagnostico["ok"]:
+            st.warning("Revisa las columnas y el formato del archivo; el archivo no está listo para importar.")
+
+    st.divider()
+    st.caption("La base consolidada se guarda en la carpeta `data`. En alojamientos con disco efímero, configura almacenamiento persistente antes del uso compartido real.")
+
 
 tab_dashboard, tab_export = st.tabs(["📊 Panel general", "📤 Reportes"])
 
@@ -440,7 +556,7 @@ def project_expiry_summary(frame, threshold):
     return summary.sort_values(["Vencidos", "Próximos a vencer", "Total documentos"], ascending=False).reset_index(drop=True)
 
 
-def build_filtered_excel(detail, summary, today):
+def build_filtered_excel(detail, summary):
     output = BytesIO()
     detail_cols = [
         "Proyecto", "Categoria", "Tipo_control", "Persona_activo", "Identificador",
@@ -524,9 +640,9 @@ with tab_dashboard:
         threshold = max(warning_days or [30])
         st.caption(f"Próximos a vencer: documentos que vencen dentro de los próximos {threshold} días. Los porcentajes se calculan sobre el total de registros de cada proyecto.")
         fc1, fc2 = st.columns(2)
-        dash_categories = options_for(all_records, "Categoria")
+        dash_categories = opciones_por_columna(all_records, "Categoria")
         dash_category = fc1.selectbox("Categoría", dash_categories, key="dash_category")
-        dash_projects = options_for(all_records, "Proyecto")
+        dash_projects = opciones_por_columna(all_records, "Proyecto")
         dash_project = fc2.selectbox("Identificar proyecto", dash_projects, key="dash_project", help="Los nombres se limpian de espacios extra y los proyectos sin nombre se muestran como 'Proyecto sin identificar'.")
 
         dash = all_records.copy()
@@ -549,15 +665,8 @@ with tab_dashboard:
             m3.metric("Próximos a vencer", soon_total, f"{(soon_total / total_docs * 100 if total_docs else 0):.1f}% del total")
             m4.metric("Vencen hoy", due_today_total)
 
-            chart_data = summary.melt(
-                id_vars="Proyecto", value_vars=["Vencidos", "Próximos a vencer"],
-                var_name="Estado", value_name="Cantidad"
-            )
-            fig_project = px.bar(
-                chart_data, y="Proyecto", x="Cantidad", color="Estado", barmode="group",
-                text="Cantidad", orientation="h", title="Cantidad de vencidos y próximos a vencer por proyecto",
-                hover_data={"Cantidad": True, "Proyecto": True, "Estado": True}
-            )
+            chart_data = summary.melt(id_vars="Proyecto", value_vars=["Vencidos", "Próximos a vencer"], var_name="Estado", value_name="Cantidad")
+            fig_project = px.bar(chart_data, y="Proyecto", x="Cantidad", color="Estado", barmode="group", text="Cantidad", orientation="h", title="Cantidad de vencidos y próximos a vencer por proyecto", hover_data={"Cantidad": True, "Proyecto": True, "Estado": True})
             fig_project.update_layout(height=max(330, min(650, 38 * len(summary) + 130)), xaxis_title="Cantidad de documentos", yaxis_title="", legend_title="", margin=dict(l=10, r=20, t=60, b=20))
             fig_project.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig_project, use_container_width=True, key="chart_project_expiry_summary")
@@ -575,7 +684,7 @@ with tab_dashboard:
                 "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento", "Responsable", "Correo"
             ]
             detail = dash[detail_cols].copy()
-            excel_bytes = build_filtered_excel(dash, summary, today)
+            excel_bytes = build_filtered_excel(dash, summary)
             csv_detail = detail.rename(columns={
                 "Categoria": "Categoría", "Tipo_control": "Tipo de control",
                 "Persona_activo": "Persona / activo", "Identificador": "Código / placa",
@@ -585,16 +694,21 @@ with tab_dashboard:
             download1, download2 = st.columns(2)
             with download1:
                 st.download_button(
-                    "⬇️ Descargar Excel filtrado (resumen + base)", data=excel_bytes,
+                    "⬇️ Descargar Excel filtrado (resumen + base)",
+                    data=excel_bytes,
                     file_name=f"vencimientos_filtrados_{today.isoformat()}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_dashboard_excel", use_container_width=True
+                    key="download_dashboard_excel",
+                    use_container_width=True,
                 )
             with download2:
                 st.download_button(
-                    "⬇️ Descargar base filtrada CSV", data=csv_detail.to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"base_filtrada_{today.isoformat()}.csv", mime="text/csv",
-                    key="download_dashboard_csv", use_container_width=True
+                    "⬇️ Descargar base filtrada CSV",
+                    data=csv_detail.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"base_filtrada_{today.isoformat()}.csv",
+                    mime="text/csv",
+                    key="download_dashboard_csv",
+                    use_container_width=True,
                 )
             with st.expander("Ver detalle de registros filtrados"):
                 detail_display = dash[[
@@ -617,9 +731,9 @@ with tab_export:
         st.info("No hay registros disponibles para generar reportes.")
     else:
         report_filters_1, report_filters_2 = st.columns(2)
-        report_cat_options = options_for(all_records, "Categoria")
+        report_cat_options = opciones_por_columna(all_records, "Categoria")
         report_cat = report_filters_1.selectbox("Filtrar informe por categoría", report_cat_options, key="report_cat")
-        report_project_options = options_for(all_records, "Proyecto")
+        report_project_options = opciones_por_columna(all_records, "Proyecto")
         report_project = report_filters_2.selectbox("Identificar proyecto / área", report_project_options, key="report_project", help="Selecciona un proyecto para ver solo sus vencimientos e indicados en el informe ejecutivo.")
         report_data = all_records.copy()
         if report_cat != "Todos":
@@ -710,7 +824,7 @@ with tab_export:
             "⬇️ Descargar informe ejecutivo Excel con gráficos",
             data=output.getvalue(),
             file_name=f"informe_corporativo_vencimientos_{today.isoformat()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         st.caption("El Excel incluye la base consolidada, acciones prioritarias, resúmenes y gráficos de barras. Los gráficos del panel web responden a los filtros; los del Excel reflejan los datos del informe actual.")
 
