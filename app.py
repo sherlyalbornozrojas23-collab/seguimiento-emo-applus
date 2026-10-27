@@ -21,32 +21,6 @@ st.set_page_config(
     layout="wide"
 )
 
-st.markdown("""
-<style>
-:root { --applus-blue: #0757a5; --applus-navy: #12304a; --applus-cyan: #21a6d7; }
-[data-testid="stAppViewContainer"] { background: linear-gradient(180deg, #f5f9fd 0%, #ffffff 260px); }
-[data-testid="stHeader"] { background: rgba(255,255,255,.82); }
-.block-container { max-width: 1500px; padding-top: 1.5rem; padding-bottom: 2.5rem; }
-h1 { color: #12304a !important; letter-spacing: -.035em; font-weight: 780 !important; }
-h2, h3 { color: #173c5c !important; letter-spacing: -.02em; }
-[data-testid="stCaptionContainer"] { color: #64748b; }
-[data-testid="stTabs"] [role="tablist"] { gap: .45rem; border-bottom: 1px solid #dbe5ef; }
-[data-testid="stTabs"] button[role="tab"] { border-radius: 12px 12px 0 0; padding: .8rem 1rem; font-weight: 650; }
-[data-testid="stTabs"] button[aria-selected="true"] { background: #e8f3fc; color: #0757a5; border-bottom: 3px solid #0757a5; }
-[data-testid="stMetric"] { background: white; border: 1px solid #e0eaf3; border-radius: 16px; padding: 1rem 1.1rem; box-shadow: 0 4px 18px rgba(21, 55, 87, .055); }
-[data-testid="stMetricLabel"] { color: #5b7185; font-weight: 650; }
-[data-testid="stMetricValue"] { color: #12304a; font-weight: 780; }
-[data-testid="stExpander"] { border: 1px solid #dce7f1; border-radius: 12px; background: rgba(255,255,255,.9); }
-[data-testid="stDataFrame"] { border: 1px solid #e0eaf3; border-radius: 12px; overflow: hidden; }
-.stButton > button, .stDownloadButton > button { border-radius: 10px; font-weight: 650; border: 1px solid #c9dbea; transition: all .15s ease; }
-.stButton > button[kind="primary"] { background: #0757a5; border-color: #0757a5; }
-.stButton > button:hover, .stDownloadButton > button:hover { border-color: #0757a5; color: #0757a5; transform: translateY(-1px); box-shadow: 0 5px 14px rgba(7,87,165,.10); }
-[data-testid="stSidebar"] { background: #f0f6fb; border-right: 1px solid #e0eaf3; }
-[data-testid="stFileUploader"] { border-radius: 14px; }
-@media (max-width: 768px) { .block-container { padding: 1rem .8rem 2rem; } h1 { font-size: 1.8rem !important; } }
-</style>
-""", unsafe_allow_html=True)
-
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 ORIGINALS_DIR = DATA_DIR / "originales"
@@ -165,7 +139,21 @@ def safe_json_value(value):
     return str(value).strip()
 
 def parse_dates(series):
-    """Parsea fechas de Excel/CSV priorizando el formato peruano DD/MM/AAAA."""
+    """Parsea fechas variadas: Excel serial, datetime, ISO, DD/MM/AAAA y formatos comunes.
+
+    En fechas ambiguas como 04/05/2026 se prioriza día/mes/año, habitual en Perú.
+    """
+    from datetime import timedelta
+
+    formats = (
+        "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y",
+        "%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d", "%Y/%m/%d",
+        "%Y.%m.%d", "%m/%d/%Y", "%m-%d-%Y",
+        "%d/%m/%Y %H:%M:%S", "%d-%m-%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S",
+        "%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y",
+    )
+
     def parse_one(value):
         if value is None:
             return None
@@ -174,35 +162,52 @@ def parse_dates(series):
                 return None
         except (TypeError, ValueError):
             pass
-        if isinstance(value, pd.Timestamp):
-            return value.date() if not pd.isna(value) else None
-        if isinstance(value, datetime):
-            return value.date()
-        if isinstance(value, date):
-            return value
+        if isinstance(value, (pd.Timestamp, datetime, date)):
+            return value.date() if isinstance(value, (pd.Timestamp, datetime)) else value
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             number = float(value)
-            if 20000 <= number <= 80000:
+            # Excel's common 1900 date system serial range.
+            if 1 <= number <= 100000:
                 try:
-                    return (pd.Timestamp("1899-12-30") + pd.to_timedelta(number, unit="D")).date()
-                except Exception:
+                    return (datetime(1899, 12, 30) + timedelta(days=number)).date()
+                except (OverflowError, ValueError):
                     return None
-        text = str(value).strip()
-        if not text or text.lower() in {"nan", "nat", "none", "null", "-", "n/a"}:
             return None
-        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y",
-                    "%Y-%m-%d", "%Y/%m/%d", "%d.%m.%Y", "%d.%m.%y",
-                    "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "nat", "none", "null", "-", "n/a", "s/f", "sin fecha"}:
+            return None
+        # Normalize common time suffixes and Spanish month accents.
+        text = re.sub(r"\s+", " ", text)
+        for fmt in formats:
             try:
                 return datetime.strptime(text, fmt).date()
             except (ValueError, TypeError):
                 continue
+        # General fallback handles timezone-bearing ISO strings and additional variants.
         try:
             parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
-            return None if pd.isna(parsed) else parsed.date()
-        except Exception:
-            return None
+            if not pd.isna(parsed):
+                return parsed.date()
+        except (TypeError, ValueError, OverflowError):
+            pass
+        return None
+
     return series.apply(parse_one)
+
+
+def clean_project_name(value):
+    """Standardize whitespace and missing labels so projects are easy to identify."""
+    if value is None:
+        return "Proyecto sin identificar"
+    try:
+        if pd.isna(value):
+            return "Proyecto sin identificar"
+    except (TypeError, ValueError):
+        pass
+    name = re.sub(r"\s+", " ", str(value)).strip()
+    if not name or name.lower() in {"nan", "none", "null", "n/a", "-", "sin proyecto", "no aplica"}:
+        return "Proyecto sin identificar"
+    return name
 
 def db_connect():
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
@@ -279,7 +284,7 @@ def import_sheet(
         raw = {str(k): safe_json_value(v) for k, v in row.to_dict().items()}
         records.append((
             source_key, source_file, sheet_name, int(idx) + 2, content_hash, uploader,
-            category, val(type_col) or category, val(project_col), val(person_col),
+            category, val(type_col) or category, clean_project_name(val(project_col)), val(person_col),
             val(identifier_col), issue.isoformat() if due_or_date(issue) else None,
             due.isoformat() if due_or_date(due) else None, val(responsible_col),
             val(email_col), val(status_col), json.dumps(raw, ensure_ascii=False), now
@@ -329,139 +334,18 @@ def options_for(df, column, include_all=True):
     values = sorted([str(x) for x in df[column].dropna().unique() if str(x).strip()])
     return (["Todos"] + values) if include_all else values
 
-st.title("Control de vencimientos | Applus+")
-st.caption("Centro de seguimiento administrativo · Consolidación de Excel/CSV, alertas visuales y reportes filtrables.")
-st.markdown("<div style='height:4px;width:100%;background:linear-gradient(90deg,#0757a5,#21a6d7,transparent);border-radius:99px;margin:.4rem 0 1.2rem'></div>", unsafe_allow_html=True)
+st.title("📅 Sistema corporativo de seguimiento de vencimientos")
+st.caption("Plataforma para consolidar vencimientos de distintas bases Excel, sin exigir una plantilla única ni modificar los archivos originales.")
 
 with st.sidebar:
     st.header("Configuración")
     today = st.date_input("Fecha de evaluación", value=date.today())
-    warning_days = st.multiselect("Anticipación de alertas (días)", [7, 15, 30, 45, 60, 90], default=[7, 15, 30])
-    uploader = st.text_input("Nombre del asistente que carga", placeholder="Ej. Sherly / Administración")
+    warning_days = st.multiselect("Anticipación de alertas (días)", [1, 7, 15], default=[1, 7, 15], help="Selecciona los avisos que deseas considerar: 1, 7 y/o 15 días antes del vencimiento.")
     st.caption("Las alertas se calculan por fecha. El sistema no valida aptitud médica ni renueva documentos.")
     st.divider()
     st.caption("La base consolidada se guarda en la carpeta `data`. En alojamientos con disco efímero, configura almacenamiento persistente antes del uso compartido real.")
 
-tab_dashboard, tab_upload, tab_sources, tab_records, tab_export = st.tabs([
-    "📊 Panel general", "📥 Cargar Excel", "🗂️ Archivos cargados",
-    "🔎 Registros", "📤 Reportes"
-])
-
-with tab_upload:
-    st.subheader("Carga inteligente de bases")
-    st.write("Importa uno o varios archivos Excel/CSV. Revisa la vista previa, confirma las columnas y luego importa cada hoja.")
-    st.info("Flujo recomendado: 1) selecciona el archivo · 2) verifica la fecha de vencimiento · 3) confirma proyecto y responsable · 4) importa la hoja.")
-    uploads = st.file_uploader(
-        "Selecciona archivos .xlsx, .xlsm o .csv",
-        type=["xlsx", "xlsm", "csv"],
-        accept_multiple_files=True,
-        key="multi_upload"
-    )
-    if uploads:
-        for uploaded in uploads:
-            file_bytes = uploaded.getvalue()
-            file_hash = hashlib.sha256(file_bytes).hexdigest()
-            st.markdown(f"#### 📄 {uploaded.name}")
-            try:
-                sheets = read_workbook(uploaded)
-            except Exception as e:
-                st.error(f"No se pudo leer {uploaded.name}: {e}")
-                continue
-
-            for sheet_name, frame in sheets.items():
-                if frame is None or frame.empty:
-                    st.warning(f"La hoja '{sheet_name}' está vacía.")
-                    continue
-                frame = frame.copy()
-                frame.columns = [str(c).strip() for c in frame.columns]
-                cols = list(frame.columns)
-                inferred_category = infer_category(uploaded.name, cols)
-                with st.expander(f"Hoja: {sheet_name} · {len(frame)} filas · categoría sugerida: {inferred_category}", expanded=(len(sheets) == 1)):
-                    st.dataframe(frame.head(8), use_container_width=True, hide_index=True)
-                    st.caption("Confirma o ajusta las columnas antes de importar. Si una columna no aplica, selecciona «No disponible».")
-
-                    def choose(label, key, found, allow_none=True):
-                        choices = (["— No disponible —"] if allow_none else []) + cols
-                        default = found if found in cols else ("— No disponible —" if allow_none else cols[0])
-                        return st.selectbox(label, choices, index=choices.index(default), key=f"{uploaded.name}_{sheet_name}_{key}")
-
-                    category = st.selectbox(
-                        "Categoría del control",
-                        CATEGORIES,
-                        index=CATEGORIES.index(inferred_category) if inferred_category in CATEGORIES else CATEGORIES.index("Otro"),
-                        key=f"{uploaded.name}_{sheet_name}_category"
-                    )
-                    due_found = find_column(cols, "due")
-                    issue_found = find_column(cols, "issue")
-                    project_found = find_column(cols, "project")
-                    person_found = find_column(cols, "person")
-                    id_found = find_column(cols, "identifier")
-                    responsible_found = find_column(cols, "responsible")
-                    email_found = find_column(cols, "email")
-                    type_found = find_column(cols, "type")
-                    status_found = find_column(cols, "status")
-
-                    due_col = choose("Columna de fecha de vencimiento (obligatoria para alertas)", "due", due_found)
-                    issue_col = choose("Columna de fecha de emisión / inicio (opcional)", "issue", issue_found)
-                    project_col = choose("Columna de proyecto / área (opcional)", "project", project_found)
-                    person_col = choose("Columna de persona / activo (opcional)", "person", person_found)
-                    id_col = choose("Columna de DNI / placa / código (opcional)", "identifier", id_found)
-                    responsible_col = choose("Columna de responsable (opcional)", "responsible", responsible_found)
-                    email_col = choose("Columna de correo (opcional)", "email", email_found)
-                    type_col = choose("Columna de tipo de documento (opcional)", "type", type_found)
-                    status_col = choose("Columna de estado existente (opcional)", "status", status_found)
-
-                    if not uploader.strip():
-                        st.warning("Escribe el nombre del asistente en la barra lateral para identificar quién realizó la carga.")
-                    if due_col == "— No disponible —":
-                        st.warning("No se ha asignado una columna de vencimiento. Los registros se importarán como «Fecha por revisar» y no generarán alertas de fecha hasta corregir la asignación.")
-                    if st.button(f"Importar hoja '{sheet_name}'", key=f"import_{uploaded.name}_{sheet_name}"):
-                        saved_path = ORIGINALS_DIR / uploaded.name
-                        # Preserve original bytes for audit/reference. Same-name files are replaced on disk.
-                        saved_path.write_bytes(file_bytes)
-                        def selected(col):
-                            return None if col == "— No disponible —" else col
-                        n = import_sheet(
-                            uploaded.name, sheet_name, frame, file_hash, uploader.strip(),
-                            category, selected(due_col), selected(issue_col), selected(project_col),
-                            selected(person_col), selected(id_col), selected(responsible_col),
-                            selected(email_col), selected(type_col), selected(status_col)
-                        )
-                        st.success(f"Se importaron {n} registros de {uploaded.name} / {sheet_name}.")
-                        st.rerun()
-
-with db_connect() as conn:
-    all_records = pd.read_sql_query("SELECT * FROM records ORDER BY imported_at DESC", conn)
-    all_sources = pd.read_sql_query("SELECT * FROM sources ORDER BY imported_at DESC", conn)
-
-if not all_records.empty:
-    all_records["Fecha_vencimiento"] = pd.to_datetime(all_records["due_date"], errors="coerce").dt.date
-    all_records["Fecha_emision"] = pd.to_datetime(all_records["issue_date"], errors="coerce").dt.date
-    all_records["Dias_restantes"] = all_records["Fecha_vencimiento"].apply(
-        lambda d: (d - today).days if pd.notna(d) else None
-    )
-    all_records["Estado_seguimiento"] = all_records["Fecha_vencimiento"].apply(
-        lambda d: calc_status(d.isoformat() if pd.notna(d) else None, today, warning_days)
-    )
-    all_records["Proyecto"] = all_records["project"].fillna("").replace("", "No especificado")
-    all_records["Categoria"] = all_records["category"].fillna("Otro")
-    all_records["Tipo_control"] = all_records["document_type"].fillna("").astype(str).str.strip()
-    empty_type = all_records["Tipo_control"].eq("")
-    all_records.loc[empty_type, "Tipo_control"] = all_records.loc[empty_type, "Categoria"].astype(str)
-    all_records["Persona_activo"] = all_records["person_asset"].fillna("")
-    all_records["Identificador"] = all_records["identifier"].fillna("")
-    all_records["Responsable"] = all_records["responsible"].fillna("")
-    all_records["Correo"] = all_records["email"].fillna("")
-    all_records["Archivo"] = all_records["source_file"].fillna("")
-    all_records["Hoja"] = all_records["source_sheet"].fillna("")
-else:
-    all_records = pd.DataFrame(columns=[
-        "id", "source_file", "source_sheet", "source_row", "category",
-        "document_type", "project", "person_asset", "identifier", "responsible",
-        "email", "due_date", "Fecha_vencimiento", "Dias_restantes",
-        "Estado_seguimiento", "Proyecto", "Categoria", "Tipo_control",
-        "Persona_activo", "Identificador", "Responsable", "Correo", "Archivo", "Hoja"
-    ])
+tab_dashboard, tab_export = st.tabs(["📊 Panel general", "📤 Reportes"])
 
 def project_expiry_summary(frame, threshold):
     """Compact summary: counts and percentages are calculated over all rows per project."""
@@ -570,7 +454,7 @@ def build_filtered_excel(detail, summary, today):
 with tab_dashboard:
     st.subheader("Vencimientos por proyecto")
     if all_records.empty:
-        st.info("Aún no hay registros consolidados. Abre la pestaña «Cargar Excel» para importar tu primera base y activar los indicadores, filtros y reportes.")
+        st.info("Aún no hay registros consolidados. No hay registros en la base de datos configurada. Los datos deben estar cargados previamente en el almacenamiento de la aplicación.")
     else:
         threshold = max(warning_days or [30])
         st.caption(f"Próximos a vencer: documentos que vencen dentro de los próximos {threshold} días. Los porcentajes se calculan sobre el total de registros de cada proyecto.")
@@ -578,7 +462,7 @@ with tab_dashboard:
         dash_categories = options_for(all_records, "Categoria")
         dash_category = fc1.selectbox("Categoría", dash_categories, key="dash_category")
         dash_projects = options_for(all_records, "Proyecto")
-        dash_project = fc2.selectbox("Proyecto", dash_projects, key="dash_project")
+        dash_project = fc2.selectbox("Identificar proyecto", dash_projects, key="dash_project", help="Los nombres se limpian de espacios extra y los proyectos sin nombre se muestran como 'Proyecto sin identificar'.")
 
         dash = all_records.copy()
         if dash_category != "Todos":
@@ -661,58 +545,16 @@ with tab_dashboard:
 
         st.caption("El panel es interactivo: modifica los filtros para recalcular las cantidades, porcentajes, gráfico y archivos descargables.")
 
-with tab_sources:
-    st.subheader("Archivos y hojas importados")
-    if all_sources.empty:
-        st.info("Todavía no se han importado archivos.")
-    else:
-        sources_view = all_sources.rename(columns={
-            "source_file": "Archivo", "source_hash": "Huella del archivo",
-            "uploaded_by": "Cargado por", "sheets": "Hoja",
-            "imported_at": "Fecha de importación"
-        })
-        st.dataframe(sources_view[["Archivo", "Hoja", "Cargado por", "Fecha de importación", "Huella del archivo"]], use_container_width=True, hide_index=True)
-        st.caption("La huella permite distinguir versiones del archivo. Al importar de nuevo una hoja con el mismo nombre, sus registros anteriores se reemplazan por la versión nueva.")
-
-with tab_records:
-    st.subheader("Buscar registros consolidados")
-    if all_records.empty:
-        st.info("No hay registros para mostrar.")
-    else:
-        f1, f2, f3 = st.columns(3)
-        cat_options = options_for(all_records, "Categoria")
-        selected_cat = f1.selectbox("Categoría", cat_options)
-        project_options = options_for(all_records, "Proyecto")
-        selected_project = f2.selectbox("Proyecto / área", project_options)
-        search = f3.text_input("Buscar por persona, placa, código, archivo o responsable").strip().lower()
-        view = all_records.copy()
-        if selected_cat != "Todos":
-            view = view[view["Categoria"].astype(str) == selected_cat]
-        if selected_project != "Todos":
-            view = view[view["Proyecto"].astype(str) == selected_project]
-        if search:
-            search_cols = ["Persona_activo", "Identificador", "Archivo", "Responsable", "Tipo_control", "Proyecto"]
-            mask = False
-            for col in search_cols:
-                mask = mask | view[col].astype(str).str.lower().str.contains(search, na=False)
-            view = view[mask]
-        display = view[[
-            "Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador",
-            "Fecha_emision", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento",
-            "Responsable", "Correo", "Archivo", "Hoja", "source_row"
-        ]].rename(columns={"source_row": "Fila origen"})
-        st.dataframe(display, use_container_width=True, hide_index=True)
-
 with tab_export:
     st.subheader("Informes ejecutivos y base consolidada")
     if all_records.empty:
-        st.info("Importa al menos una hoja para habilitar reportes.")
+        st.info("No hay registros disponibles para generar reportes.")
     else:
         report_filters_1, report_filters_2 = st.columns(2)
         report_cat_options = options_for(all_records, "Categoria")
         report_cat = report_filters_1.selectbox("Filtrar informe por categoría", report_cat_options, key="report_cat")
         report_project_options = options_for(all_records, "Proyecto")
-        report_project = report_filters_2.selectbox("Filtrar informe por proyecto / área", report_project_options, key="report_project")
+        report_project = report_filters_2.selectbox("Identificar proyecto / área", report_project_options, key="report_project", help="Selecciona un proyecto para ver solo sus vencimientos e indicadores.")
         report_data = all_records.copy()
         if report_cat != "Todos":
             report_data = report_data[report_data["Categoria"].astype(str) == report_cat]
