@@ -699,7 +699,20 @@ with tab_export:
             "Fecha_emision", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento",
             "Responsable", "Correo", "Archivo", "Hoja", "source_row", "uploaded_by"
         ]
-        report = report_data[export_cols].rename(columns={
+        # Algunas bases antiguas o importaciones no incluyen metadatos de origen.
+        # Completar columnas ausentes evita que el reporte falle con KeyError.
+        export_defaults = {
+            "Categoria": "Otro", "Tipo_control": "Sin tipo", "Proyecto": "Proyecto sin identificar",
+            "Persona_activo": "", "Identificador": "", "Fecha_emision": None,
+            "Fecha_vencimiento": None, "Dias_restantes": None, "Estado_seguimiento": "Sin fecha válida",
+            "Responsable": "", "Correo": "", "Archivo": "", "Hoja": "",
+            "source_row": None, "uploaded_by": ""
+        }
+        report_data = report_data.copy()
+        for column in export_cols:
+            if column not in report_data.columns:
+                report_data[column] = export_defaults.get(column, "")
+        report = report_data.reindex(columns=export_cols).rename(columns={
             "source_row": "Fila_origen", "uploaded_by": "Cargado_por"
         }).copy()
         priority_report = report[
