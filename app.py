@@ -34,7 +34,6 @@ CATEGORIES = [
     "Calibración", "Certificado / permiso", "Otro"
 ]
 
-# Palabras clave usadas para reconocer columnas; se comparan sin tildes.
 ALIASES = {
     "due": [
         "fecha vencimiento", "fecha de vencimiento", "vencimiento",
@@ -73,11 +72,12 @@ ALIASES = {
     "status": ["estado", "estado seguimiento", "situacion", "situación"]
 }
 
+
 def norm(value):
     value = str(value).strip().lower()
     replacements = {
-        "á":"a", "é":"e", "í":"i", "ó":"o", "ú":"u",
-        "ü":"u", "ñ":"n"
+        "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u",
+        "ü": "u", "ñ": "n"
     }
     for old, new in replacements.items():
         value = value.replace(old, new)
@@ -85,18 +85,18 @@ def norm(value):
     value = re.sub(r"\s+", " ", value)
     return value
 
+
 def find_column(columns, key):
     aliases = [norm(x) for x in ALIASES[key]]
     normalized = {col: norm(col) for col in columns}
-    # Prefer exact header matches.
     for col, ncol in normalized.items():
         if ncol in aliases:
             return col
-    # Then match headers that contain a known phrase.
     for col, ncol in normalized.items():
         if any(alias in ncol for alias in aliases if len(alias) >= 4):
             return col
     return None
+
 
 def infer_category(filename, columns):
     text = norm(filename + " " + " ".join(map(str, columns)))
@@ -117,6 +117,7 @@ def infer_category(filename, columns):
             return category
     return "Otro"
 
+
 def read_workbook(uploaded_file):
     name = uploaded_file.name
     content = uploaded_file.getvalue()
@@ -131,6 +132,7 @@ def read_workbook(uploaded_file):
         for sheet in excel.sheet_names
     }
 
+
 def safe_json_value(value):
     if pd.isna(value):
         return None
@@ -138,11 +140,8 @@ def safe_json_value(value):
         return value.isoformat()
     return str(value).strip()
 
-def parse_dates(series):
-    """Parsea fechas variadas: Excel serial, datetime, ISO, DD/MM/AAAA y formatos comunes.
 
-    En fechas ambiguas como 04/05/2026 se prioriza día/mes/año, habitual en Perú.
-    """
+def parse_dates(series):
     from datetime import timedelta
 
     formats = (
@@ -166,7 +165,6 @@ def parse_dates(series):
             return value.date() if isinstance(value, (pd.Timestamp, datetime)) else value
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             number = float(value)
-            # Excel's common 1900 date system serial range.
             if 1 <= number <= 100000:
                 try:
                     return (datetime(1899, 12, 30) + timedelta(days=number)).date()
@@ -176,14 +174,12 @@ def parse_dates(series):
         text = str(value).strip()
         if not text or text.lower() in {"nan", "nat", "none", "null", "-", "n/a", "s/f", "sin fecha"}:
             return None
-        # Normalize common time suffixes and Spanish month accents.
         text = re.sub(r"\s+", " ", text)
         for fmt in formats:
             try:
                 return datetime.strptime(text, fmt).date()
             except (ValueError, TypeError):
                 continue
-        # General fallback handles timezone-bearing ISO strings and additional variants.
         try:
             parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
             if not pd.isna(parsed):
@@ -196,7 +192,6 @@ def parse_dates(series):
 
 
 def clean_project_name(value):
-    """Standardize whitespace and missing labels so projects are easy to identify."""
     if value is None:
         return "Proyecto sin identificar"
     try:
@@ -208,6 +203,7 @@ def clean_project_name(value):
     if not name or name.lower() in {"nan", "none", "null", "n/a", "-", "sin proyecto", "no aplica"}:
         return "Proyecto sin identificar"
     return name
+
 
 def db_connect():
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
@@ -247,13 +243,16 @@ def db_connect():
     conn.commit()
     return conn
 
+
 def load_records():
     with db_connect() as conn:
         return pd.read_sql_query("SELECT * FROM records ORDER BY source_file, source_sheet, source_row", conn)
 
+
 def load_sources():
     with db_connect() as conn:
         return pd.read_sql_query("SELECT * FROM sources ORDER BY imported_at DESC", conn)
+
 
 def import_sheet(
     source_file, sheet_name, frame, content_hash, uploader, category,
@@ -269,9 +268,9 @@ def import_sheet(
     issue_dates = parse_dates(df[issue_col]) if issue_col and issue_col in df.columns else pd.Series([None] * len(df), index=df.index)
 
     for idx, row in df.iterrows():
-        # Ignore entirely empty rows.
         if all(pd.isna(v) or str(v).strip() == "" for v in row.tolist()):
             continue
+
         def val(col):
             if not col or col not in df.columns:
                 return None
@@ -279,6 +278,7 @@ def import_sheet(
             if pd.isna(v):
                 return None
             return str(v).strip()
+
         due = due_dates.loc[idx] if idx in due_dates.index else None
         issue = issue_dates.loc[idx] if idx in issue_dates.index else None
         raw = {str(k): safe_json_value(v) for k, v in row.to_dict().items()}
@@ -291,7 +291,6 @@ def import_sheet(
         ))
 
     with db_connect() as conn:
-        # Re-importing a sheet replaces its previously imported rows, not other sheets/files.
         conn.execute("DELETE FROM records WHERE source_key = ?", (source_key,))
         conn.execute("DELETE FROM sources WHERE source_key = ?", (source_key,))
         conn.executemany("""
@@ -309,8 +308,10 @@ def import_sheet(
         conn.commit()
     return len(records)
 
+
 def due_or_date(value):
     return value is not None and not pd.isna(value)
+
 
 def calc_status(value, today, thresholds):
     if value is None or pd.isna(value) or str(value).strip() == "":
@@ -330,12 +331,13 @@ def calc_status(value, today, thresholds):
         return "Próximo a vencer"
     return "Vigente según fecha"
 
+
 def options_for(df, column, include_all=True):
+    if df is None or column not in df.columns:
+        return ["Todos"] if include_all else []
     values = sorted([str(x) for x in df[column].dropna().unique() if str(x).strip()])
     return (["Todos"] + values) if include_all else values
 
-st.title("📅 Sistema corporativo de seguimiento de vencimientos")
-st.caption("Plataforma para consolidar vencimientos de distintas bases Excel, sin exigir una plantilla única ni modificar los archivos originales.")
 
 with st.sidebar:
     st.header("Configuración")
@@ -345,52 +347,75 @@ with st.sidebar:
     st.divider()
     st.caption("La base consolidada se guarda en la carpeta `data`. En alojamientos con disco efímero, configura almacenamiento persistente antes del uso compartido real.")
 
-# Cargar y preparar la base consolidada para el panel y los reportes.
-# Esta lectura sustituye las antiguas pestañas de carga/archivos/registros;
-# no añade esas secciones a la interfaz.
-try:
-    db_records = load_records()
-except Exception as exc:
-    st.error("No se pudo leer la base de datos de vencimientos.")
-    st.caption(f"Detalle técnico: {type(exc).__name__}")
-    db_records = pd.DataFrame()
 
-try:
-    all_sources = load_sources()
-except Exception as exc:
-    st.warning("No se pudo leer el historial de archivos de origen; el panel y los reportes seguirán disponibles.")
-    st.caption(f"Detalle técnico del historial: {type(exc).__name__}")
-    all_sources = pd.DataFrame(columns=["source_key", "source_file", "source_hash", "uploaded_by", "sheets", "imported_at"])
-
-if db_records.empty:
-    all_records = pd.DataFrame(columns=[
-        "Categoria", "Proyecto", "Tipo_control", "Persona_activo", "Identificador",
+def normalize_records(frame, reference_date):
+    df = frame.copy() if frame is not None else pd.DataFrame()
+    required_columns = [
+        "Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador",
         "Fecha_emision", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento",
-        "Responsable", "Correo"
-    ])
-else:
-    all_records = pd.DataFrame({
-        "Categoria": db_records.get("category", pd.Series(index=db_records.index, dtype=object)).fillna("Otro").astype(str),
-        "Proyecto": db_records.get("project", pd.Series(index=db_records.index, dtype=object)).apply(clean_project_name),
-        "Tipo_control": db_records.get("document_type", pd.Series(index=db_records.index, dtype=object)).fillna("Sin tipo").astype(str),
-        "Persona_activo": db_records.get("person_asset", pd.Series(index=db_records.index, dtype=object)).fillna("").astype(str),
-        "Identificador": db_records.get("identifier", pd.Series(index=db_records.index, dtype=object)).fillna("").astype(str),
-        "Fecha_emision": pd.to_datetime(db_records.get("issue_date", pd.Series(index=db_records.index, dtype=object)), errors="coerce").dt.date,
-        "Fecha_vencimiento": pd.to_datetime(db_records.get("due_date", pd.Series(index=db_records.index, dtype=object)), errors="coerce").dt.date,
-        "Responsable": db_records.get("responsible", pd.Series(index=db_records.index, dtype=object)).fillna("").astype(str),
-        "Correo": db_records.get("email", pd.Series(index=db_records.index, dtype=object)).fillna("").astype(str),
-    })
-    all_records["Dias_restantes"] = all_records["Fecha_vencimiento"].apply(
-        lambda value: (value - today).days if isinstance(value, date) else None
-    )
-    all_records["Estado_seguimiento"] = all_records["Fecha_vencimiento"].apply(
-        lambda value: calc_status(value, today, warning_days)
-    )
+        "Responsable", "Correo", "Archivo", "Hoja", "source_row", "uploaded_by",
+        "source_file", "source_sheet", "source_status"
+    ]
+    for col in required_columns:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    if "category" in df.columns:
+        df["Categoria"] = df["category"].fillna("Otro")
+    if "document_type" in df.columns:
+        df["Tipo_control"] = df["document_type"].fillna("Sin tipo")
+    if "project" in df.columns:
+        df["Proyecto"] = df["project"].fillna("Proyecto sin identificar")
+    if "person_asset" in df.columns:
+        df["Persona_activo"] = df["person_asset"].fillna("Sin dato")
+    if "identifier" in df.columns:
+        df["Identificador"] = df["identifier"].fillna("Sin dato")
+    if "issue_date" in df.columns:
+        df["Fecha_emision"] = pd.to_datetime(df["issue_date"], errors="coerce")
+    if "due_date" in df.columns:
+        df["Fecha_vencimiento"] = pd.to_datetime(df["due_date"], errors="coerce")
+    if "responsible" in df.columns:
+        df["Responsable"] = df["responsible"].fillna("Sin responsable")
+    if "email" in df.columns:
+        df["Correo"] = df["email"].fillna("Sin correo")
+    if "source_file" in df.columns:
+        df["Archivo"] = df["source_file"].fillna("Sin archivo")
+    if "source_sheet" in df.columns:
+        df["Hoja"] = df["source_sheet"].fillna("Sin hoja")
+    if "source_row" in df.columns:
+        df["source_row"] = df["source_row"].fillna(0).astype(int)
+    if "uploaded_by" in df.columns:
+        df["uploaded_by"] = df["uploaded_by"].fillna("Sistema")
+    if "source_status" in df.columns:
+        df["Estado_seguimiento"] = df["source_status"].fillna("Fecha por revisar")
+    else:
+        df["Estado_seguimiento"] = "Fecha por revisar"
+
+    if "Fecha_vencimiento" in df.columns:
+        df["Dias_restantes"] = (pd.to_datetime(df["Fecha_vencimiento"], errors="coerce") - pd.Timestamp(reference_date)).dt.days
+        df["Estado_seguimiento"] = df.apply(
+            lambda row: calc_status(row["Fecha_vencimiento"], reference_date, [1, 7, 15])
+            if pd.notna(row["Fecha_vencimiento"]) else "Fecha por revisar",
+            axis=1,
+        )
+
+    for col in ["Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador", "Responsable", "Correo", "Archivo", "Hoja"]:
+        df[col] = df[col].fillna("Sin dato").astype(str)
+
+    df["Dias_restantes"] = pd.to_numeric(df["Dias_restantes"], errors="coerce").fillna(0)
+    return df
+
+
+all_records = normalize_records(load_records(), today)
+all_sources = load_sources()
+
+st.title("📅 Sistema corporativo de seguimiento de vencimientos")
+st.caption("Plataforma para consolidar vencimientos de distintas bases Excel, sin exigir una plantilla única ni modificar los archivos originales.")
 
 tab_dashboard, tab_export = st.tabs(["📊 Panel general", "📤 Reportes"])
 
+
 def project_expiry_summary(frame, threshold):
-    """Compact summary: counts and percentages are calculated over all rows per project."""
     if frame.empty:
         return pd.DataFrame(columns=[
             "Proyecto", "Total documentos", "Vencidos", "% vencidos",
@@ -416,7 +441,6 @@ def project_expiry_summary(frame, threshold):
 
 
 def build_filtered_excel(detail, summary, today):
-    """Create a clean Excel workbook with a project summary and only the filtered base."""
     output = BytesIO()
     detail_cols = [
         "Proyecto", "Categoria", "Tipo_control", "Persona_activo", "Identificador",
@@ -472,7 +496,6 @@ def build_filtered_excel(detail, summary, today):
             chart.x_axis.title = "Cantidad de documentos"
             chart.height = max(7, min(14, summary_ws.max_row * 0.35))
             chart.width = 18
-            # Columns C and F are the two action counts in the summary.
             data = Reference(summary_ws, min_col=3, max_col=3, min_row=1, max_row=summary_ws.max_row)
             cats = Reference(summary_ws, min_col=1, min_row=2, max_row=summary_ws.max_row)
             chart.add_data(data, titles_from_data=True)
@@ -587,6 +610,7 @@ with tab_dashboard:
 
         st.caption("El panel es interactivo: modifica los filtros para recalcular las cantidades, porcentajes, gráfico y archivos descargables.")
 
+
 with tab_export:
     st.subheader("Informes ejecutivos y base consolidada")
     if all_records.empty:
@@ -596,7 +620,7 @@ with tab_export:
         report_cat_options = options_for(all_records, "Categoria")
         report_cat = report_filters_1.selectbox("Filtrar informe por categoría", report_cat_options, key="report_cat")
         report_project_options = options_for(all_records, "Proyecto")
-        report_project = report_filters_2.selectbox("Identificar proyecto / área", report_project_options, key="report_project", help="Selecciona un proyecto para ver solo sus vencimientos e indicadores.")
+        report_project = report_filters_2.selectbox("Identificar proyecto / área", report_project_options, key="report_project", help="Selecciona un proyecto para ver solo sus vencimientos e indicados en el informe ejecutivo.")
         report_data = all_records.copy()
         if report_cat != "Todos":
             report_data = report_data[report_data["Categoria"].astype(str) == report_cat]
@@ -640,7 +664,6 @@ with tab_export:
             project_summary.to_excel(writer, index=False, sheet_name="Resumen_proyecto")
             if not all_sources.empty:
                 all_sources.to_excel(writer, index=False, sheet_name="Archivos_importados")
-            # Add bar charts to the Excel workbook so the report includes visual summaries.
             from openpyxl.chart import BarChart, Reference
             from openpyxl.styles import Font, PatternFill, Alignment
             workbook = writer.book
@@ -689,7 +712,7 @@ with tab_export:
             file_name=f"informe_corporativo_vencimientos_{today.isoformat()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        st.caption("El Excel incluye la base consolidada, acciones prioritarias, resúmenes y gráficos de barras. Los gráficos del panel web responden a los filtros; los del Excel reflejan los datos incluidos al descargarlo.")
+        st.caption("El Excel incluye la base consolidada, acciones prioritarias, resúmenes y gráficos de barras. Los gráficos del panel web responden a los filtros; los del Excel reflejan los datos del informe actual.")
 
 st.divider()
 st.caption(
