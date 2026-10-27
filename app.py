@@ -667,34 +667,6 @@ with tab_dashboard:
             summary_display["% próximos a vencer"] = summary_display["% próximos a vencer"].map(lambda x: f"{x:.1f}%")
             st.dataframe(summary_display, use_container_width=True, hide_index=True, height=min(500, 45 * (len(summary_display) + 1)))
 
-            st.markdown("#### Descargar base filtrada")
-            st.caption("La descarga respeta los filtros de categoría y proyecto seleccionados. El Excel contiene una hoja resumen por proyecto y otra con el detalle de los registros filtrados.")
-            detail_cols = [
-                "Proyecto", "Categoria", "Tipo_control", "Persona_activo", "Identificador",
-                "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento", "Responsable", "Correo"
-            ]
-            detail = dash[detail_cols].copy()
-            excel_bytes = build_filtered_excel(dash, summary, today)
-            csv_detail = detail.rename(columns={
-                "Categoria": "Categoría", "Tipo_control": "Tipo de control",
-                "Persona_activo": "Persona / activo", "Identificador": "Código / placa",
-                "Fecha_vencimiento": "Fecha de vencimiento", "Dias_restantes": "Días restantes",
-                "Estado_seguimiento": "Estado"
-            })
-            download1, download2 = st.columns(2)
-            with download1:
-                st.download_button(
-                    "⬇️ Descargar Excel filtrado (resumen + base)", data=excel_bytes,
-                    file_name=f"vencimientos_filtrados_{today.isoformat()}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_dashboard_excel", use_container_width=True
-                )
-            with download2:
-                st.download_button(
-                    "⬇️ Descargar base filtrada CSV", data=csv_detail.to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"base_filtrada_{today.isoformat()}.csv", mime="text/csv",
-                    key="download_dashboard_csv", use_container_width=True
-                )
             with st.expander("Ver detalle de registros filtrados"):
                 detail_display = dash[[
                     "Proyecto", "Categoria", "Tipo_control", "Persona_activo", "Identificador",
@@ -707,7 +679,7 @@ with tab_dashboard:
                 })
                 st.dataframe(detail_display, use_container_width=True, hide_index=True)
 
-        st.caption("El panel es interactivo: modifica los filtros para recalcular las cantidades, porcentajes, gráfico y archivos descargables.")
+        st.caption("El panel es interactivo: modifica los filtros para recalcular los indicadores, gráficos y tabla resumen.")
 
 with tab_export:
     st.subheader("Informes ejecutivos y base consolidada")
@@ -762,61 +734,106 @@ with tab_export:
         report = report_data.reindex(columns=export_cols).rename(columns={
             "source_row": "Fila_origen", "uploaded_by": "Cargado_por"
         }).copy()
-        priority_report = report[
-            report["Estado_seguimiento"].isin(["Vencido", "Vence hoy", "Próximo a vencer"])
-            | report["Estado_seguimiento"].str.startswith("Vence en", na=False)
-        ]
+        # Exportación ejecutiva: solo indicadores y documentos que requieren atención.
+        days_numeric = pd.to_numeric(report["Dias_restantes"], errors="coerce")
+        priority_report = report.loc[days_numeric.notna() & (days_numeric <= threshold)].copy()
+        priority_report["Dias_restantes"] = pd.to_numeric(priority_report["Dias_restantes"], errors="coerce")
+        priority_report = priority_report.sort_values("Dias_restantes", ascending=True, na_position="last")
+
+        report_days = pd.to_numeric(report["Dias_restantes"], errors="coerce")
+        report_total = int(len(report))
+        report_expired = int((report_days < 0).sum())
+        report_soon = int(((report_days >= 0) & (report_days <= threshold)).sum())
+        valid_report_days = report_days.notna()
+        report_compliance = (
+            float((report_days[valid_report_days] > threshold).sum() / valid_report_days.sum() * 100)
+            if valid_report_days.any() else 0.0
+        )
+        executive = pd.DataFrame({
+            "Indicador": ["Total documentos", "Vencidos", "Próximos a vencer", "Cumplimiento"],
+            "Valor": [report_total, report_expired, report_soon, f"{report_compliance:.1f}%"]
+        })
+
+        risk_data = report.copy()
+        risk_data["Dias_restantes"] = pd.to_numeric(risk_data["Dias_restantes"], errors="coerce")
+        risk_data["_vencido"] = risk_data["Dias_restantes"] < 0
+        risk_data["_hoy"] = risk_data["Dias_restantes"] == 0
+        risk_data["_proximo"] = risk_data["Dias_restantes"].gt(0) & risk_data["Dias_restantes"].le(threshold)
+        risk_summary = risk_data.groupby("Proyecto", dropna=False).agg(
+            **{"Total documentos": ("Proyecto", "size"), "Vencidos": ("_vencido", "sum"),
+               "Vencen hoy": ("_hoy", "sum"), "Próximos a vencer": ("_proximo", "sum")}
+        ).reset_index().sort_values(["Vencidos", "Próximos a vencer", "Total documentos"], ascending=False)
+
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            report.to_excel(writer, index=False, sheet_name="Base_consolidada")
-            priority_report.to_excel(writer, index=False, sheet_name="Acciones_prioritarias")
-            cat_summary.to_excel(writer, index=False, sheet_name="Resumen_categoria")
-            status_summary.to_excel(writer, index=False, sheet_name="Resumen_estado")
-            project_summary.to_excel(writer, index=False, sheet_name="Resumen_proyecto")
-            if not all_sources.empty:
-                all_sources.to_excel(writer, index=False, sheet_name="Archivos_importados")
-            # Add bar charts to the Excel workbook so the report includes visual summaries.
+            executive.to_excel(writer, index=False, sheet_name="Resumen_Ejecutivo", startrow=1)
+            priority_report.to_excel(writer, index=False, sheet_name="Acciones_Prioritarias")
+            risk_summary.to_excel(writer, index=False, sheet_name="Riesgo_por_Proyecto")
+
             from openpyxl.chart import BarChart, Reference
             from openpyxl.styles import Font, PatternFill, Alignment
             workbook = writer.book
-            for sheet_name, title in [("Resumen_categoria", "Vencimientos por categoría"), ("Resumen_estado", "Vencimientos por estado"), ("Resumen_proyecto", "Vencimientos por proyecto")]:
+            red_fill = PatternFill(fill_type="solid", start_color="FFFFB3B3", end_color="FFFFB3B3")
+            yellow_fill = PatternFill(fill_type="solid", start_color="FFFFF2CC", end_color="FFFFF2CC")
+            header_fill = PatternFill(fill_type="solid", fgColor="174A7E")
+
+            ws_exec = workbook["Resumen_Ejecutivo"]
+            ws_exec["A1"] = "RESUMEN EJECUTIVO"
+            ws_exec["A1"].font = Font(bold=True, size=16, color="173B57")
+            ws_exec.merge_cells("A1:B1")
+            for cell in ws_exec[2]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = header_fill
+            ws_exec.column_dimensions["A"].width = 30
+            ws_exec.column_dimensions["B"].width = 22
+            ws_exec.freeze_panes = "A3"
+            ws_exec.sheet_view.showGridLines = False
+
+            for sheet_name in ["Acciones_Prioritarias", "Riesgo_por_Proyecto"]:
                 ws = workbook[sheet_name]
                 ws.freeze_panes = "A2"
                 ws.auto_filter.ref = ws.dimensions
+                ws.sheet_view.showGridLines = False
                 for cell in ws[1]:
                     cell.font = Font(bold=True, color="FFFFFF")
-                    cell.fill = PatternFill("solid", fgColor="174A7E")
-                    cell.alignment = Alignment(horizontal="center")
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                 for col_cells in ws.columns:
                     letter = col_cells[0].column_letter
-                    max_len = max((len(str(c.value or "")) for c in col_cells), default=10)
-                    ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 36)
-                if ws.max_row > 1:
-                    chart = BarChart()
-                    chart.type = "bar"
-                    chart.style = 10
-                    chart.title = title
-                    chart.y_axis.title = "Cantidad"
-                    chart.x_axis.title = "Grupo"
-                    data = Reference(ws, min_col=2, min_row=1, max_row=ws.max_row)
-                    cats = Reference(ws, min_col=1, min_row=2, max_row=ws.max_row)
-                    chart.add_data(data, titles_from_data=True)
-                    chart.set_categories(cats)
-                    chart.height = 7
-                    chart.width = 15
-                    ws.add_chart(chart, "D2")
-            for sheet_name in ["Base_consolidada", "Acciones_prioritarias", "Archivos_importados"]:
-                if sheet_name in workbook.sheetnames:
-                    ws = workbook[sheet_name]
-                    ws.freeze_panes = "A2"
-                    ws.auto_filter.ref = ws.dimensions
-                    for cell in ws[1]:
-                        cell.font = Font(bold=True, color="FFFFFF")
-                        cell.fill = PatternFill("solid", fgColor="174A7E")
-                    for col_cells in ws.columns:
-                        letter = col_cells[0].column_letter
-                        max_len = max((len(str(c.value or "")) for c in col_cells[:100]), default=10)
-                        ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 36)
+                    max_len = max((len(str(c.value or "")) for c in col_cells[:200]), default=10)
+                    ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 34)
+
+            ws_priority = workbook["Acciones_Prioritarias"]
+            day_col = next((cell.column for cell in ws_priority[1] if cell.value == "Dias_restantes"), None)
+            if day_col:
+                for row_idx in range(2, ws_priority.max_row + 1):
+                    value = ws_priority.cell(row_idx, day_col).value
+                    if value is None:
+                        continue
+                    try:
+                        days = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    fill = red_fill if days < 0 else yellow_fill if days <= 15 else None
+                    if fill:
+                        for cell in ws_priority[row_idx]:
+                            cell.fill = fill
+
+            ws_risk = workbook["Riesgo_por_Proyecto"]
+            if ws_risk.max_row > 1:
+                chart = BarChart()
+                chart.type = "bar"
+                chart.style = 10
+                chart.title = "Riesgo documental por proyecto"
+                chart.y_axis.title = "Proyecto"
+                chart.x_axis.title = "Cantidad de documentos"
+                data = Reference(ws_risk, min_col=3, max_col=4, min_row=1, max_row=ws_risk.max_row)
+                cats = Reference(ws_risk, min_col=1, min_row=2, max_row=ws_risk.max_row)
+                chart.add_data(data, titles_from_data=True)
+                chart.set_categories(cats)
+                chart.height = max(7, min(14, ws_risk.max_row * 0.35))
+                chart.width = 18
+                ws_risk.add_chart(chart, "G2")
 
         st.download_button(
             "⬇️ Descargar informe ejecutivo Excel con gráficos",
@@ -824,7 +841,7 @@ with tab_export:
             file_name=f"informe_corporativo_vencimientos_{today.isoformat()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        st.caption("El Excel incluye la base consolidada, acciones prioritarias, resúmenes y gráficos de barras. Los gráficos del panel web responden a los filtros; los del Excel reflejan los datos incluidos al descargarlo.")
+        st.caption("El Excel contiene tres hojas: Resumen Ejecutivo, Acciones Prioritarias y Riesgo por Proyecto. Las acciones incluyen documentos vencidos o que vencen dentro del umbral seleccionado; el semáforo marca vencidos en rojo y próximos en amarillo.")
 
 st.divider()
 st.caption(
