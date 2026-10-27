@@ -411,6 +411,37 @@ else:
         lambda value: calc_status(value, today, warning_days)
     )
 
+# Diagnóstico temporal para identificar en qué etapa se pierden los datos.
+# Está dentro de un expander para no recargar el panel ejecutivo.
+with st.expander("🔎 Diagnóstico de datos (abrir si los gráficos aparecen vacíos)", expanded=False):
+    st.write("Registros cargados desde SQLite:", len(db_records))
+    st.write("Registros preparados para el dashboard:", len(all_records))
+    if not db_records.empty:
+        diagnostic_columns = [c for c in ["project", "due_date", "issue_date", "source_file", "source_sheet"] if c in db_records.columns]
+        st.write("Muestra directa de SQLite:")
+        st.dataframe(db_records[diagnostic_columns].head(20), use_container_width=True, hide_index=True)
+        st.write("Distribución de proyectos guardados en SQLite:")
+        if "project" in db_records.columns:
+            st.dataframe(
+                db_records["project"].fillna("(vacío)").astype(str).value_counts(dropna=False).head(30).rename_axis("Proyecto guardado").reset_index(name="Cantidad"),
+                use_container_width=True, hide_index=True
+            )
+    if not all_records.empty:
+        st.write("Muestra de fechas y estados calculados:")
+        st.dataframe(
+            all_records[[c for c in ["Proyecto", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento"] if c in all_records.columns]].head(20),
+            use_container_width=True, hide_index=True
+        )
+        st.write("Distribución de estados:")
+        st.dataframe(
+            all_records["Estado_seguimiento"].fillna("(vacío)").astype(str).value_counts(dropna=False).rename_axis("Estado").reset_index(name="Cantidad"),
+            use_container_width=True, hide_index=True
+        )
+        invalid_dates = int(pd.to_datetime(all_records["Fecha_vencimiento"], errors="coerce").isna().sum())
+        st.write(f"Fechas de vencimiento no interpretadas: {invalid_dates} de {len(all_records)}")
+    else:
+        st.warning("No hay registros consolidados en esta base SQLite. Si ya habías importado un archivo, puede que Streamlit Cloud esté usando una base local distinta o que la importación no se haya completado.")
+
 tab_dashboard, tab_export = st.tabs(["📊 Panel general", "📤 Reportes"])
 
 def project_expiry_summary(frame, threshold):
