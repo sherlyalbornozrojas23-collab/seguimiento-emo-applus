@@ -654,43 +654,38 @@ with tab_dashboard:
             m4.metric("Próximos a vencer", soon_total)
             m5.metric("Vencen hoy", due_today_total)
 
-            chart_data = summary.melt(
-                id_vars="Proyecto", value_vars=["Vencidos", "Próximos a vencer"],
-                var_name="Estado", value_name="Cantidad"
-            )
-            # Resumen ejecutivo: distribución de estados y ranking de proyectos críticos.
-            status_counts = dash["Estado_seguimiento"].fillna("Sin estado").astype(str).value_counts().reset_index()
-            status_counts.columns = ["Estado", "Cantidad"]
-            fig_status = px.pie(
-                status_counts, names="Estado", values="Cantidad", hole=0.62,
-                title="Distribución de estados documentales"
-            )
-            fig_status.update_layout(height=320, margin=dict(l=10, r=10, t=55, b=10), legend_title="")
-            fig_status.update_traces(textposition="inside", textinfo="percent+label")
-            critical = summary.sort_values(["Vencidos", "Próximos a vencer"], ascending=False).head(10)
-            fig_critical = px.bar(
-                critical, x="Vencidos", y="Proyecto", orientation="h",
-                title="Proyectos con mayor cantidad de documentos vencidos",
-                text="Vencidos", hover_data=["Próximos a vencer", "Total documentos", "% cumplimiento"]
-            )
-            fig_critical.update_layout(height=max(300, min(520, 38 * len(critical) + 100)),
-                                       yaxis={"categoryorder": "total ascending"},
-                                       margin=dict(l=10, r=20, t=55, b=15))
-            fig_critical.update_traces(textposition="outside", cliponaxis=False)
-            chart_left, chart_right = st.columns(2)
-            with chart_left:
-                st.plotly_chart(fig_status, use_container_width=True, key="chart_document_status_donut")
-            with chart_right:
-                st.plotly_chart(fig_critical, use_container_width=True, key="chart_critical_projects")
-
+            # Gráfico 1: porcentaje de documentos vencidos por proyecto.
+            project_chart = summary.copy()
+            project_chart["% vencidos"] = pd.to_numeric(project_chart["% vencidos"], errors="coerce").fillna(0)
             fig_project = px.bar(
-                chart_data, y="Proyecto", x="Cantidad", color="Estado", barmode="group",
-                text="Cantidad", orientation="h", title="Cantidad de vencidos y próximos a vencer por proyecto",
-                hover_data={"Cantidad": True, "Proyecto": True, "Estado": True}
+                project_chart.sort_values("% vencidos"),
+                x="% vencidos", y="Proyecto", orientation="h", text="% vencidos",
+                color="% vencidos", color_continuous_scale="Reds",
+                title="% de documentos vencidos por proyecto"
             )
-            fig_project.update_layout(height=max(330, min(650, 38 * len(summary) + 130)), xaxis_title="Cantidad de documentos", yaxis_title="", legend_title="", margin=dict(l=10, r=20, t=60, b=20))
-            fig_project.update_traces(textposition="outside", cliponaxis=False)
-            st.plotly_chart(fig_project, use_container_width=True, key="chart_project_expiry_summary")
+            fig_project.update_traces(texttemplate="%{text:.1f}%", textposition="outside", cliponaxis=False)
+            fig_project.update_layout(height=500, xaxis_title="% vencidos", yaxis_title="", coloraxis_colorbar_title="% vencidos",
+                                      margin=dict(l=10, r=30, t=60, b=20))
+            st.plotly_chart(fig_project, use_container_width=True, key="chart_expired_percentage_project")
+
+            # Gráfico 2: porcentaje de documentos vencidos por categoría.
+            cat_total = dash.groupby("Categoria", dropna=False).size().reset_index(name="Total")
+            cat_expired = (
+                dash[dash["Estado_seguimiento"].astype(str) == "Vencido"]
+                .groupby("Categoria", dropna=False).size().reset_index(name="Vencidos")
+            )
+            cat_chart = cat_total.merge(cat_expired, on="Categoria", how="left")
+            cat_chart["Vencidos"] = cat_chart["Vencidos"].fillna(0)
+            cat_chart["Porcentaje"] = (cat_chart["Vencidos"] / cat_chart["Total"].replace(0, pd.NA) * 100).fillna(0).round(1)
+            fig_cat = px.bar(
+                cat_chart.sort_values("Porcentaje", ascending=False), x="Categoria", y="Porcentaje",
+                text="Porcentaje", color="Porcentaje", color_continuous_scale="Oranges",
+                title="% de documentos vencidos por categoría"
+            )
+            fig_cat.update_traces(texttemplate="%{text:.1f}%", textposition="outside", cliponaxis=False)
+            fig_cat.update_layout(height=500, xaxis_title="Categoría", yaxis_title="% vencidos",
+                                  showlegend=False, margin=dict(l=10, r=20, t=60, b=25))
+            st.plotly_chart(fig_cat, use_container_width=True, key="chart_expired_percentage_category")
 
             st.markdown("#### Resumen por proyecto")
             summary_display = summary.copy()
@@ -698,17 +693,6 @@ with tab_dashboard:
             summary_display["% próximos a vencer"] = summary_display["% próximos a vencer"].map(lambda x: f"{x:.1f}%")
             st.dataframe(summary_display, use_container_width=True, hide_index=True, height=min(500, 45 * (len(summary_display) + 1)))
 
-            with st.expander("Ver detalle de registros filtrados"):
-                detail_display = dash[[
-                    "Proyecto", "Categoria", "Tipo_control", "Persona_activo", "Identificador",
-                    "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento"
-                ]].rename(columns={
-                    "Categoria": "Categoría", "Tipo_control": "Tipo de control",
-                    "Persona_activo": "Persona / activo", "Identificador": "Código / placa",
-                    "Fecha_vencimiento": "Fecha de vencimiento", "Dias_restantes": "Días restantes",
-                    "Estado_seguimiento": "Estado"
-                })
-                st.dataframe(detail_display, use_container_width=True, hide_index=True)
 
         st.caption("El panel es interactivo: modifica los filtros para recalcular los indicadores, gráficos y tabla resumen.")
 
@@ -728,21 +712,8 @@ with tab_export:
         if report_project != "Todos":
             report_data = report_data[report_data["Proyecto"].astype(str) == report_project]
 
-        status_summary = report_data.groupby("Estado_seguimiento").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
-        cat_summary = report_data.groupby("Categoria").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
-        project_summary = report_data.groupby("Proyecto").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
-        st.markdown("#### Vista gráfica del informe")
-        report_chart_1, report_chart_2 = st.columns(2)
-        with report_chart_1:
-            fig_report_status = px.bar(status_summary, x="Estado_seguimiento", y="Cantidad", color="Estado_seguimiento", text="Cantidad", title="Resumen por estado")
-            fig_report_status.update_layout(xaxis_title="Estado", yaxis_title="Cantidad", xaxis_tickangle=-25, height=360)
-            fig_report_status.update_traces(textposition="outside")
-            st.plotly_chart(fig_report_status, use_container_width=True, key="report_status_chart")
-        with report_chart_2:
-            fig_report_cat = px.bar(cat_summary, x="Categoria", y="Cantidad", color="Categoria", text="Cantidad", title="Resumen por categoría")
-            fig_report_cat.update_layout(xaxis_title="Categoría", yaxis_title="Cantidad", xaxis_tickangle=-25, height=360, showlegend=False)
-            fig_report_cat.update_traces(textposition="outside")
-            st.plotly_chart(fig_report_cat, use_container_width=True, key="report_category_chart")
+        st.markdown("#### Resumen del reporte")
+        st.caption("Los gráficos ejecutivos de vencimientos están disponibles en el Panel general. El reporte descargable contiene resumen, acciones prioritarias y riesgo por proyecto.")
 
         export_cols = [
             "Categoria", "Tipo_control", "Proyecto", "Persona_activo", "Identificador",
