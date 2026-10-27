@@ -634,6 +634,19 @@ def build_filtered_excel(detail, summary):
 
 with tab_dashboard:
     st.subheader("Vencimientos por proyecto")
+
+    if uploaded_file is not None:
+        with st.expander("Diagnóstico del archivo cargado", expanded=True):
+            diagnostico = diagnosticar_archivo(uploaded_file)
+            if diagnostico["ok"]:
+                st.success(diagnostico["mensaje"])
+                st.write("Hojas detectadas:", diagnostico["hojas"])
+                st.write("Resumen de validación:")
+                st.json(diagnostico["validacion"])
+            else:
+                st.error(diagnostico["mensaje"])
+                st.json(diagnostico["validacion"])
+
     if all_records.empty:
         st.info("Aún no hay registros consolidados. No hay registros en la base de datos configurada. Los datos deben estar cargados previamente en el almacenamiento de la aplicación.")
     else:
@@ -654,17 +667,34 @@ with tab_dashboard:
         if dash.empty:
             st.warning("No hay registros para los filtros seleccionados.")
         else:
-            summary = project_expiry_summary(dash, threshold)
-            total_docs = int(summary["Total documentos"].sum())
-            expired_total = int(summary["Vencidos"].sum())
-            soon_total = int(summary["Próximos a vencer"].sum())
-            due_today_total = int(summary["Vencen hoy"].sum())
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Documentos filtrados", total_docs)
-            m2.metric("Vencidos", expired_total, f"{(expired_total / total_docs * 100 if total_docs else 0):.1f}% del total")
-            m3.metric("Próximos a vencer", soon_total, f"{(soon_total / total_docs * 100 if total_docs else 0):.1f}% del total")
-            m4.metric("Vencen hoy", due_today_total)
+            status_summary = dash["Estado_seguimiento"].value_counts().reset_index()
+            status_summary.columns = ["Estado", "Cantidad"]
+            status_summary = status_summary.sort_values("Cantidad", ascending=False)
 
+            col1, col2, col3, col4 = st.columns(4)
+            total_docs = int(len(dash))
+            expired_total = int((dash["Estado_seguimiento"] == "Vencido").sum())
+            soon_total = int((dash["Estado_seguimiento"].str.contains("Próximo a vencer|Vence en|Vence hoy", regex=True, na=False)).sum())
+            due_today_total = int((dash["Estado_seguimiento"] == "Vence hoy").sum())
+
+            col1.metric("Documentos filtrados", total_docs)
+            col2.metric("Vencidos", expired_total, f"{(expired_total / total_docs * 100 if total_docs else 0):.1f}% del total")
+            col3.metric("Próximos a vencer", soon_total, f"{(soon_total / total_docs * 100 if total_docs else 0):.1f}% del total")
+            col4.metric("Vencen hoy", due_today_total)
+
+            fig_status = px.bar(
+                status_summary,
+                x="Estado",
+                y="Cantidad",
+                color="Estado",
+                text="Cantidad",
+                title="Cuantificación de documentos por estado",
+            )
+            fig_status.update_layout(xaxis_title="Estado", yaxis_title="Cantidad", xaxis_tickangle=-25, height=360)
+            fig_status.update_traces(textposition="outside")
+            st.plotly_chart(fig_status, use_container_width=True, key="status_quantification_chart")
+
+            summary = project_expiry_summary(dash, threshold)
             chart_data = summary.melt(id_vars="Proyecto", value_vars=["Vencidos", "Próximos a vencer"], var_name="Estado", value_name="Cantidad")
             fig_project = px.bar(chart_data, y="Proyecto", x="Cantidad", color="Estado", barmode="group", text="Cantidad", orientation="h", title="Cantidad de vencidos y próximos a vencer por proyecto", hover_data={"Cantidad": True, "Proyecto": True, "Estado": True})
             fig_project.update_layout(height=max(330, min(650, 38 * len(summary) + 130)), xaxis_title="Cantidad de documentos", yaxis_title="", legend_title="", margin=dict(l=10, r=20, t=60, b=20))
