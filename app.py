@@ -294,10 +294,13 @@ def import_sheet(
             val(email_col), val(status_col), json.dumps(raw, ensure_ascii=False), now
         ))
 
+    # Preparar y validar todos los registros ANTES de reemplazar la base activa.
+    if not records:
+        raise ValueError("La hoja seleccionada no contiene registros válidos. Se conservó la base anterior.")
     with db_connect() as conn:
-        # Re-importing a sheet replaces its previously imported rows, not other sheets/files.
-        conn.execute("DELETE FROM records WHERE source_key = ?", (source_key,))
-        conn.execute("DELETE FROM sources WHERE source_key = ?", (source_key,))
+        # Una sola transacción: si falla cualquier INSERT, SQLite revierte los DELETE.
+        conn.execute("DELETE FROM records")
+        conn.execute("DELETE FROM sources")
         conn.executemany("""
             INSERT INTO records (
                 source_key, source_file, source_sheet, source_row, source_hash,
@@ -605,20 +608,17 @@ with tab_dashboard:
                             if not original_path.exists():
                                 with open(original_path, "wb") as original_file:
                                     original_file.write(file_bytes)
-                            # Evitar duplicar la misma fuente si se vuelve a cargar con otro nombre.
-                            with db_connect() as conn:
-                                duplicate = conn.execute(
-                                    "SELECT source_file FROM sources WHERE source_hash = ? LIMIT 1",
-                                    (file_hash,)
-                                ).fetchone()
-                            if duplicate and duplicate[0] != saved_name:
-                                st.warning(f"Este archivo ya fue importado como {duplicate[0]}. No se duplicaron los registros.")
-                            else:
+                            # La nueva importación reemplaza TODA la base activa, incluso si
+                            # el archivo coincide con uno importado anteriormente.
+                            try:
                                 count = import_sheet(saved_name, sheet_name, upload_df, file_hash, "Usuario de la aplicación", up_category, mapped(up_due), mapped(up_issue), mapped(up_project), mapped(up_person), mapped(up_identifier), mapped(up_responsible), mapped(up_email), mapped(up_type), mapped(up_status))
+                            except Exception as import_exc:
+                                st.error(f"No se reemplazó la base: {import_exc}")
+                            else:
                                 load_records.clear()
                                 load_sources.clear()
                                 st.cache_data.clear()
-                                st.success(f"Importación completada: {count} filas incorporadas desde {saved_name} · {sheet_name}. El archivo original se conservó en data/originales.")
+                                st.success(f"Base reemplazada: {count} filas activas de {saved_name} · {sheet_name}. El archivo original se conservó en data/originales.")
                                 st.rerun()
             except Exception as exc:
                 st.error("No se pudo leer el archivo. Verifica que esté en formato Excel o CSV y que no esté dañado.")
