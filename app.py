@@ -650,112 +650,131 @@ with tab_dashboard:
             except Exception as exc:
                 st.error("No se pudo leer el archivo. Verifica que esté en formato Excel o CSV y que no esté dañado.")
                 st.caption(f"Detalle técnico: {type(exc).__name__}")
-    st.subheader("Indicadores y vencimientos por proyecto")
     if all_records.empty:
-        st.info("Aún no hay registros consolidados. No hay registros en la base de datos configurada. Los datos deben estar cargados previamente en el almacenamiento de la aplicación.")
+        st.info("Aún no hay registros consolidados. Carga un Excel o CSV para comenzar el seguimiento.")
     else:
-        threshold = max(warning_days or [30])
-        st.caption(f"Próximos a vencer: documentos que vencen en los próximos {threshold} días, sin incluir los que vencen hoy.")
-        fc1, fc2 = st.columns(2)
-        dash_categories = options_for(all_records, "Categoria")
-        dash_category = fc1.selectbox("Categoría", dash_categories, key="dash_category")
-        dash_projects = options_for(all_records, "Proyecto")
-        dash_project = fc2.selectbox("Identificar proyecto", dash_projects, key="dash_project", help="Los nombres se limpian de espacios extra y los proyectos sin nombre se muestran como 'Proyecto sin identificar'.")
+        threshold = max(warning_days or [15])
+        st.caption(f"Vista ejecutiva · alertas de próximos vencimientos configuradas hasta {threshold} días.")
 
+        # Búsqueda rápida global, además de los filtros desplegables.
+        search = st.text_input("🔎 Buscar colaborador, placa, documento o proyecto", key="quick_search",
+                               placeholder="Ej. nombre, placa, EMO altura, Proyecto Las Bambas…")
+        f1, f2 = st.columns(2)
+        dash_category = f1.selectbox("Categoría", options_for(all_records, "Categoria"), key="dash_category")
+        dash_project = f2.selectbox("Proyecto", options_for(all_records, "Proyecto"), key="dash_project")
         dash = all_records.copy()
         if dash_category != "Todos":
             dash = dash[dash["Categoria"].astype(str) == dash_category]
         if dash_project != "Todos":
             dash = dash[dash["Proyecto"].astype(str) == dash_project]
+        if search.strip():
+            q = search.strip().casefold()
+            searchable = [c for c in ["Proyecto", "Categoria", "Tipo_control", "Persona_activo", "Identificador", "Responsable", "Correo"] if c in dash.columns]
+            match = pd.Series(False, index=dash.index)
+            for col in searchable:
+                match |= dash[col].fillna("").astype(str).str.casefold().str.contains(re.escape(q), na=False)
+            dash = dash[match]
 
         if dash.empty:
-            st.warning("No hay registros para los filtros seleccionados.")
+            st.warning("No se encontraron registros con los filtros o la búsqueda seleccionados.")
         else:
-            summary = project_expiry_summary(dash, threshold)
-            total_docs = int(summary["Total documentos"].sum())
-            expired_total = int(summary["Vencidos"].sum())
-            soon_total = int(summary["Próximos a vencer"].sum())
-            due_today_total = int(summary["Vencen hoy"].sum())
-            valid_days = pd.to_numeric(dash["Dias_restantes"], errors="coerce")
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Total documentos", total_docs)
-            k2.metric("🚨 Vencidos", expired_total)
-            k3.metric(f"⚠️ Próximos ({threshold} días)", soon_total)
-            k4.metric("📅 Vencen hoy", due_today_total)
-            st.caption(f"Vigentes fuera de alerta: {int((valid_days > threshold).sum())} · Sin fecha válida: {int(valid_days.isna().sum())}")
+            days = pd.to_numeric(dash["Dias_restantes"], errors="coerce")
+            total_docs = len(dash)
+            expired = int((days < 0).sum())
+            due_today = int((days == 0).sum())
+            soon = int((days > 0).mul(days <= threshold).sum())
+            no_date = int(days.isna().sum())
+            valid = int(days.notna().sum())
+            compliant = int((days > threshold).sum())
+            compliance = (compliant / valid * 100) if valid else 0.0
 
-            dash["Tipo_control"] = dash["Tipo_control"].fillna("").astype(str).str.strip()
-            dash.loc[dash["Tipo_control"].isin(["", "None", "nan", "NaN"]), "Tipo_control"] = "Sin tipo"
-            by_type = (dash.groupby("Tipo_control", dropna=False).size()
-                       .reset_index(name="Cantidad"))
-            st.markdown("#### Documentos por tipo específico")
-            fig_all = px.bar(by_type.sort_values("Cantidad", ascending=False), x="Tipo_control", y="Cantidad",
-                             text="Cantidad", color_discrete_sequence=["#245B7A"])
-            fig_all.update_layout(height=350, xaxis_title="", yaxis_title="Documentos")
-            st.plotly_chart(fig_all, use_container_width=True, key="count_by_category")
+            st.markdown("### Resumen ejecutivo")
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("🔵 Total documentos", f"{total_docs:,}")
+            k2.metric("🟢 Cumplimiento", f"{compliance:.1f}%")
+            k3.metric("🔴 Vencidos", f"{expired:,}", delta=f"{expired} requieren acción" if expired else "Sin vencidos", delta_color="inverse")
+            k4.metric("🟡 Próximos a vencer", f"{soon:,}")
+            k5.metric("🟠 Vencen hoy", f"{due_today:,}")
+            if no_date:
+                st.caption(f"Hay {no_date} registros sin fecha de vencimiento válida; no se incluyen en el porcentaje de cumplimiento.")
 
-            left, right = st.columns(2)
-            for target, mask, title, color, chart_key in [
-                (left, valid_days < 0, "Vencidos por tipo", "#B42318", "expired_category"),
-                (right, (valid_days > 0) & (valid_days <= threshold), "Próximos a vencer por tipo", "#D6A323", "soon_category")
-            ]:
-                with target:
-                    st.markdown(f"#### {title}")
-                    counts = (dash.loc[mask].groupby("Tipo_control", dropna=False)
-                              .size().reset_index(name="Cantidad"))
-                    if counts.empty:
-                        st.info("Sin documentos en esta condición.")
-                    else:
-                        counts["Tipo_control"] = counts["Tipo_control"].fillna("Sin tipo")
-                        fig = px.bar(counts.sort_values("Cantidad"), x="Cantidad", y="Tipo_control",
-                                     orientation="h", text="Cantidad", color_discrete_sequence=[color])
-                        fig.update_layout(height=350, xaxis_title="Documentos", yaxis_title="")
-                        st.plotly_chart(fig, use_container_width=True, key=chart_key)
+            # Semáforo gerencial y distribución de estados.
+            gauge_col, donut_col = st.columns(2)
+            with gauge_col:
+                st.markdown("#### Cumplimiento general")
+                gauge_color = "#27855D" if compliance >= 90 else "#D6A323" if compliance >= 75 else "#B42318"
+                gauge_label = "Excelente" if compliance >= 90 else "En observación" if compliance >= 75 else "Requiere atención"
+                gauge = go.Figure(go.Indicator(mode="gauge+number", value=compliance,
+                    number={"suffix":"%", "font":{"size":38,"color":"#173B57"}},
+                    title={"text":gauge_label,"font":{"size":18,"color":gauge_color}},
+                    gauge={"axis":{"range":[0,100],"ticksuffix":"%"},
+                           "bar":{"color":gauge_color},"bgcolor":"white",
+                           "steps":[{"range":[0,75],"color":"#FBE9E7"},{"range":[75,90],"color":"#FFF4D6"},{"range":[90,100],"color":"#E5F4EC"}],
+                           "threshold":{"line":{"color":"#173B57","width":3},"thickness":0.8,"value":90}}))
+                gauge.update_layout(height=280, margin=dict(l=25,r=25,t=55,b=15))
+                st.plotly_chart(gauge, use_container_width=True, key="executive_gauge")
+            with donut_col:
+                st.markdown("#### Distribución de estados")
+                state_counts = pd.DataFrame({"Estado":["Vigentes","Vencidos","Próximos","Vencen hoy","Sin fecha válida"],
+                    "Cantidad":[compliant,expired,soon,due_today,no_date]})
+                state_counts = state_counts[state_counts["Cantidad"] > 0]
+                if state_counts.empty:
+                    st.info("No hay estados disponibles.")
+                else:
+                    donut = px.pie(state_counts, names="Estado", values="Cantidad", hole=0.60,
+                        color="Estado", color_discrete_map={"Vigentes":"#27855D","Vencidos":"#B42318","Próximos":"#E8BC48","Vencen hoy":"#E87924","Sin fecha válida":"#8394A4"})
+                    donut.update_traces(textposition="inside", textinfo="percent+label", hole=0.60)
+                    donut.update_layout(height=280, margin=dict(l=10,r=10,t=10,b=10), showlegend=False)
+                    st.plotly_chart(donut, use_container_width=True, key="executive_donut")
 
-            st.markdown("#### Resumen por proyecto")
-            summary_display = summary.copy()
-            summary_display["% vencidos"] = summary_display["% vencidos"].map(lambda x: f"{x:.1f}%")
-            summary_display["% próximos a vencer"] = summary_display["% próximos a vencer"].map(lambda x: f"{x:.1f}%")
-            st.dataframe(summary_display, use_container_width=True, hide_index=True, height=min(500, 45 * (len(summary_display) + 1)))
+            dash = dash.copy()
+            dash["_dias"] = pd.to_numeric(dash["Dias_restantes"], errors="coerce")
+            dash["Tipo_control"] = dash["Tipo_control"].fillna("").astype(str).str.strip().replace({"":"Sin tipo","nan":"Sin tipo","None":"Sin tipo"})
+            project_summary = project_expiry_summary(dash, threshold)
+            st.markdown("### Ranking de proyectos críticos")
+            critical = project_summary.sort_values(["Vencidos","Próximos a vencer","Vencen hoy"], ascending=False).head(10).copy()
+            if not critical.empty:
+                critical_chart = px.bar(critical.sort_values("Vencidos", ascending=True), x="Vencidos", y="Proyecto", orientation="h",
+                    text="Vencidos", color="Vencidos", color_continuous_scale=[[0,"#E8BC48"],[1,"#B42318"]])
+                critical_chart.update_layout(height=max(300, 35*len(critical)+100), xaxis_title="Documentos vencidos", yaxis_title="", coloraxis_showscale=False)
+                st.plotly_chart(critical_chart, use_container_width=True, key="critical_projects_chart")
+                st.dataframe(critical[["Proyecto","Total documentos","Vencidos","Vencen hoy","Próximos a vencer","% cumplimiento"]], use_container_width=True, hide_index=True)
 
-            st.markdown("#### Top 10 proyectos críticos")
-            critical = summary.sort_values(["Vencidos", "Próximos a vencer", "Vencen hoy"], ascending=False).head(10).copy()
-            critical["Semáforo"] = critical.apply(
-                lambda r: "🔴 Vencido" if r["Vencidos"] > 0 else
-                ("🟡 Próximo a vencer" if r["Próximos a vencer"] > 0 or r["Vencen hoy"] > 0 else "🟢 Vigente"), axis=1)
-            st.dataframe(critical[["Proyecto", "Total documentos", "Vencidos", "Vencen hoy", "Próximos a vencer", "Semáforo"]],
-                         use_container_width=True, hide_index=True)
-            st.markdown("#### Mapa de calor: proyecto vs. documento")
-            heat_data = dash.copy()
-            heat_data["Proyecto"] = heat_data["Proyecto"].fillna("Proyecto sin identificar")
-            heat_data["Tipo_control"] = heat_data["Tipo_control"].fillna("Sin tipo").astype(str).str.strip()
-            heat_data.loc[heat_data["Tipo_control"].isin(["", "None", "nan", "NaN"]), "Tipo_control"] = "Sin tipo"
-            heat_data["Nivel"] = 0  # 0 vigente, 1 alerta, 2 vencido, 3 fecha faltante
-            heat_data.loc[(valid_days >= 0) & (valid_days <= threshold), "Nivel"] = 1
-            heat_data.loc[valid_days < 0, "Nivel"] = 2
-            heat_data.loc[valid_days.isna(), "Nivel"] = 3
-            matrix = heat_data.pivot_table(index="Proyecto", columns="Tipo_control", values="Nivel", aggfunc="max")
-            ordered = summary.sort_values(["Vencidos", "Próximos a vencer"], ascending=False)["Proyecto"].head(20)
-            matrix = matrix.reindex([p for p in ordered if p in matrix.index])
+            st.markdown("### Riesgo SST · proyecto vs. tipo de documento")
+            heat = dash.copy()
+            heat["Nivel"] = 0
+            heat.loc[(heat["_dias"] >= 0) & (heat["_dias"] <= threshold), "Nivel"] = 1
+            heat.loc[heat["_dias"] < 0, "Nivel"] = 2
+            heat.loc[heat["_dias"].isna(), "Nivel"] = 3
+            matrix = heat.pivot_table(index="Proyecto", columns="Tipo_control", values="Nivel", aggfunc="max")
+            ordered_projects = project_summary.sort_values(["Vencidos","Próximos a vencer","Vencen hoy"], ascending=False)["Proyecto"].head(20).tolist()
+            matrix = matrix.reindex([name for name in ordered_projects if name in matrix.index])
             if not matrix.empty:
-                # Ausencia de documentos en la combinación se muestra como gris, no como vigente.
-                z = matrix.fillna(4).values
-                fig_heat = go.Figure(go.Heatmap(
-                    z=z, x=matrix.columns.tolist(), y=matrix.index.tolist(), zmin=0, zmax=4,
-                    colorscale=[[0,"#27855D"],[0.24,"#27855D"],[0.25,"#E8BC48"],
-                                [0.49,"#E8BC48"],[0.5,"#B42318"],[0.74,"#B42318"],
-                                [0.75,"#8394A4"],[1,"#D9DEE5"]],
-                    colorbar=dict(tickvals=[0,1,2,3,4], ticktext=["Vigente","Alerta","Vencido","Sin fecha","No aplica"]),
-                    hovertemplate="Proyecto: %{y}<br>Tipo: %{x}<br>Nivel: %{z}<extra></extra>"
-                ))
-                fig_heat.update_layout(height=max(340, min(850, 38*len(matrix)+130)),
-                                       xaxis_title="Tipo de documento", yaxis_title="Proyecto")
-                st.plotly_chart(fig_heat, use_container_width=True, key="heat_project_document")
-            st.caption("Se muestra el estado más crítico de cada combinación. Gris: fecha no válida o documento no registrado.")
+                heatmap = go.Figure(go.Heatmap(z=matrix.fillna(4).values, x=matrix.columns.tolist(), y=matrix.index.tolist(), zmin=0, zmax=4,
+                    colorscale=[[0,"#27855D"],[0.24,"#27855D"],[0.25,"#E8BC48"],[0.49,"#E8BC48"],[0.5,"#B42318"],[0.74,"#B42318"],[0.75,"#8394A4"],[1,"#D9DEE5"]],
+                    colorbar=dict(tickvals=[0,1,2,3,4],ticktext=["Vigente","Alerta","Vencido","Sin fecha","Sin documento"]),
+                    hovertemplate="Proyecto: %{y}<br>Tipo: %{x}<br>Nivel: %{z}<extra></extra>"))
+                heatmap.update_layout(height=max(330,min(800,36*len(matrix)+130)), margin=dict(l=15,r=15,t=20,b=80), xaxis_title="Tipo de documento", yaxis_title="Proyecto")
+                st.plotly_chart(heatmap, use_container_width=True, key="project_type_heatmap")
+            st.caption("Semáforo: verde = vigente; amarillo = próximo a vencer; rojo = vencido; gris = sin fecha o sin documento registrado.")
 
+            st.markdown("### 🚨 Documentos que requieren acción")
+            action = dash.loc[dash["_dias"].notna() & (dash["_dias"] <= threshold)].copy()
+            action["Prioridad"] = action["_dias"].apply(lambda n: "🔴 Vencido" if n < 0 else "🟠 Vence hoy" if n == 0 else "🟡 Menos de 7 días" if n <= 7 else "🟠 Menos de 15 días")
+            action = action.sort_values("_dias", ascending=True)
+            action_cols = [c for c in ["Prioridad","Proyecto","Tipo_control","Persona_activo","Identificador","Fecha_vencimiento","Dias_restantes","Responsable"] if c in action.columns]
+            if action.empty:
+                st.success("No hay documentos vencidos ni próximos a vencer dentro del umbral seleccionado.")
+            else:
+                st.dataframe(action[action_cols], use_container_width=True, hide_index=True, height=320)
 
-
-        st.caption("El panel es interactivo: modifica los filtros para recalcular los indicadores, gráficos y tabla resumen.")
+            st.markdown("### Base documental completa")
+            table_cols = [c for c in ["Proyecto","Categoria","Tipo_control","Persona_activo","Identificador","Fecha_vencimiento","Dias_restantes","Estado_seguimiento","Responsable","Correo"] if c in dash.columns]
+            st.dataframe(dash[table_cols].sort_values("Dias_restantes", na_position="last"), use_container_width=True, hide_index=True, height=420)
+            csv_bytes = dash[table_cols].to_csv(index=False).encode("utf-8-sig")
+            st.download_button("⬇️ Descargar base filtrada en CSV", data=csv_bytes,
+                file_name=f"base_documental_applus_{today.isoformat()}.csv", mime="text/csv", key="download_dashboard_csv")
+            st.caption("Los indicadores, ranking, mapa de calor y acciones prioritarias se recalculan con los filtros y la búsqueda aplicada.")
 
 with tab_export:
     st.subheader("Informes ejecutivos y base consolidada")
@@ -914,4 +933,3 @@ st.caption(
     "los permisos, el acceso a la aplicación, la retención de archivos y el almacenamiento. "
     "No cargues diagnósticos ni historias clínicas. Los archivos originales se guardan en data/originales."
 )
-
