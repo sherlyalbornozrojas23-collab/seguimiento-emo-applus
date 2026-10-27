@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import sqlite3
 import json
 import hashlib
@@ -270,9 +271,10 @@ def import_sheet(
     due_dates = parse_dates(df[due_col]) if due_col and due_col in df.columns else pd.Series([None] * len(df), index=df.index)
     issue_dates = parse_dates(df[issue_col]) if issue_col and issue_col in df.columns else pd.Series([None] * len(df), index=df.index)
 
-    for idx, row in df.iterrows():
+    for idx, row_values in enumerate(df.itertuples(index=False, name=None)):
+        row = dict(zip(df.columns, row_values))
         # Ignore entirely empty rows.
-        if all(pd.isna(v) or str(v).strip() == "" for v in row.tolist()):
+        if all(pd.isna(v) or str(v).strip() == "" for v in row.values()):
             continue
         def val(col):
             if not col or col not in df.columns:
@@ -281,9 +283,9 @@ def import_sheet(
             if pd.isna(v):
                 return None
             return str(v).strip()
-        due = due_dates.loc[idx] if idx in due_dates.index else None
-        issue = issue_dates.loc[idx] if idx in issue_dates.index else None
-        raw = {str(k): safe_json_value(v) for k, v in row.to_dict().items()}
+        due = due_dates.iloc[idx] if idx < len(due_dates) else None
+        issue = issue_dates.iloc[idx] if idx < len(issue_dates) else None
+        raw = {str(k): safe_json_value(v) for k, v in row.items()}
         records.append((
             source_key, source_file, sheet_name, int(idx) + 2, content_hash, uploader,
             category, val(type_col) or category, clean_project_name(val(project_col)), val(person_col),
@@ -344,7 +346,7 @@ st.markdown("""
 .applus-hero {background:linear-gradient(110deg,#173B57 0%,#245B7A 72%,#397895 100%); padding:1.35rem 1.6rem; border-radius:14px; color:white; margin-bottom:1rem;}
 .applus-hero h1 {font-size:1.8rem; font-weight:700; margin:0 0 .35rem 0; color:white;}
 .applus-hero p {margin:0; color:#E7EFF4; font-size:.98rem;}
-[data-testid="stMetric"] {background:#FFFFFF; border:1px solid #E1E7EC; padding:1rem 1.1rem; border-radius:12px; box-shadow:0 2px 8px rgba(20,50,70,.04);}
+[data-testid="stMetric"] {border-left:4px solid #245B7A; background:#FFFFFF; border:1px solid #E1E7EC; padding:1rem 1.1rem; border-radius:12px; box-shadow:0 2px 8px rgba(20,50,70,.04);}
 [data-testid="stMetricLabel"] p {color:#536575; font-weight:600;}
 [data-testid="stTabs"] button {font-weight:600;}
 [data-testid="stSidebar"] {background:#F5F7F9;}
@@ -615,6 +617,7 @@ with tab_dashboard:
                                 count = import_sheet(saved_name, sheet_name, upload_df, file_hash, "Usuario de la aplicación", up_category, mapped(up_due), mapped(up_issue), mapped(up_project), mapped(up_person), mapped(up_identifier), mapped(up_responsible), mapped(up_email), mapped(up_type), mapped(up_status))
                                 load_records.clear()
                                 load_sources.clear()
+                                st.cache_data.clear()
                                 st.success(f"Importación completada: {count} filas incorporadas desde {saved_name} · {sheet_name}. El archivo original se conservó en data/originales.")
                                 st.rerun()
             except Exception as exc:
@@ -646,13 +649,43 @@ with tab_dashboard:
             expired_total = int(summary["Vencidos"].sum())
             soon_total = int(summary["Próximos a vencer"].sum())
             due_today_total = int(summary["Vencen hoy"].sum())
-            compliance = float(summary["% cumplimiento"].mean()) if not summary.empty else 0.0
+            valid_days = pd.to_numeric(dash["Dias_restantes"], errors="coerce")
+            valid_mask = valid_days.notna()
+            compliance = float((valid_days[valid_mask] > threshold).sum() / valid_mask.sum() * 100) if valid_mask.any() else 0.0
             m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Documentos", total_docs)
+            m1.metric("Total documentos", total_docs)
             m2.metric("Cumplimiento", f"{compliance:.1f}%")
             m3.metric("Vencidos", expired_total, f"{(expired_total / total_docs * 100 if total_docs else 0):.1f}% del total")
             m4.metric("Próximos a vencer", soon_total)
             m5.metric("Vencen hoy", due_today_total)
+
+            left_visual, right_visual = st.columns(2)
+            with left_visual:
+                gauge = go.Figure(go.Indicator(
+                    mode="gauge+number", value=compliance,
+                    number={"suffix": "%", "font": {"color": "#173B57"}},
+                    title={"text": "Cumplimiento documental"},
+                    gauge={"axis": {"range": [0, 100]}, "bar": {"color": "#245B7A"},
+                           "steps": [{"range": [0, 60], "color": "#F9D7D9"},
+                                     {"range": [60, 85], "color": "#FFF0BF"},
+                                     {"range": [85, 100], "color": "#D7F0DE"}]}
+                ))
+                gauge.update_layout(height=280, margin=dict(l=15, r=15, t=55, b=15))
+                st.plotly_chart(gauge, use_container_width=True, key="compliance_gauge")
+            with right_visual:
+                status_counts = pd.DataFrame({
+                    "Estado": ["Vencido", "Vence hoy", "Próximo a vencer", "Vigente", "Sin fecha válida"],
+                    "Documentos": [expired_total, due_today_total, soon_total,
+                                   int((valid_days > threshold).sum()), int((~valid_mask).sum())]
+                })
+                status_counts = status_counts[status_counts["Documentos"] > 0]
+                donut = px.pie(status_counts, names="Estado", values="Documentos", hole=0.65,
+                               title="Distribución documental", color="Estado",
+                               color_discrete_map={"Vencido": "#C53030", "Vence hoy": "#E37D27",
+                                                   "Próximo a vencer": "#E8BC48", "Vigente": "#27855D",
+                                                   "Sin fecha válida": "#8394A4"})
+                donut.update_layout(height=280, margin=dict(l=10, r=10, t=55, b=15))
+                st.plotly_chart(donut, use_container_width=True, key="document_status_donut")
 
             # Gráfico 1: porcentaje de documentos vencidos por proyecto.
             project_chart = summary.copy()
@@ -692,6 +725,23 @@ with tab_dashboard:
             summary_display["% vencidos"] = summary_display["% vencidos"].map(lambda x: f"{x:.1f}%")
             summary_display["% próximos a vencer"] = summary_display["% próximos a vencer"].map(lambda x: f"{x:.1f}%")
             st.dataframe(summary_display, use_container_width=True, hide_index=True, height=min(500, 45 * (len(summary_display) + 1)))
+
+            st.markdown("#### Top 10 proyectos críticos")
+            critical = summary.sort_values(["Vencidos", "Próximos a vencer", "Vencen hoy"], ascending=False).head(10).copy()
+            critical["Semáforo"] = critical.apply(
+                lambda r: "🔴 Vencido" if r["Vencidos"] > 0 else
+                ("🟡 Próximo a vencer" if r["Próximos a vencer"] > 0 or r["Vencen hoy"] > 0 else "🟢 Vigente"), axis=1)
+            st.dataframe(critical[["Proyecto", "Total documentos", "Vencidos", "Vencen hoy", "Próximos a vencer", "Semáforo"]],
+                         use_container_width=True, hide_index=True)
+            st.markdown("#### Mapa de calor de riesgos")
+            heat = summary.head(20).set_index("Proyecto")[["Vencidos", "Vencen hoy", "Próximos a vencer"]]
+            if not heat.empty:
+                heat_fig = px.imshow(heat, aspect="auto", text_auto=True, color_continuous_scale="YlOrRd",
+                                     labels={"x": "Riesgo", "y": "Proyecto", "color": "Documentos"})
+                heat_fig.update_layout(height=max(300, min(700, len(heat) * 33 + 100)),
+                                       margin=dict(l=10, r=15, t=30, b=20))
+                st.plotly_chart(heat_fig, use_container_width=True, key="project_risk_heatmap")
+
 
 
         st.caption("El panel es interactivo: modifica los filtros para recalcular los indicadores, gráficos y tabla resumen.")
@@ -829,9 +879,11 @@ with tab_export:
                 chart.title = "Riesgo documental por proyecto"
                 chart.y_axis.title = "Proyecto"
                 chart.x_axis.title = "Cantidad de documentos"
-                data = Reference(ws_risk, min_col=3, max_col=4, min_row=1, max_row=ws_risk.max_row)
+                data = Reference(ws_risk, min_col=3, max_col=3, min_row=1, max_row=ws_risk.max_row)
                 cats = Reference(ws_risk, min_col=1, min_row=2, max_row=ws_risk.max_row)
                 chart.add_data(data, titles_from_data=True)
+                upcoming = Reference(ws_risk, min_col=5, max_col=5, min_row=1, max_row=ws_risk.max_row)
+                chart.add_data(upcoming, titles_from_data=True)
                 chart.set_categories(cats)
                 chart.height = max(7, min(14, ws_risk.max_row * 0.35))
                 chart.width = 18
