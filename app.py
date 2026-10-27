@@ -698,63 +698,35 @@ with tab_dashboard:
             if no_date:
                 st.caption(f"Hay {no_date} registros sin fecha de vencimiento válida; no se incluyen en el porcentaje de cumplimiento.")
 
-            # Semáforo gerencial y distribución de estados.
-            gauge_col, donut_col = st.columns(2)
-            with gauge_col:
-                st.markdown("#### Cumplimiento general")
-                gauge_color = "#27855D" if compliance >= 90 else "#D6A323" if compliance >= 75 else "#B42318"
-                gauge_label = "Excelente" if compliance >= 90 else "En observación" if compliance >= 75 else "Requiere atención"
-                gauge = go.Figure(go.Indicator(mode="gauge+number", value=compliance,
-                    number={"suffix":"%", "font":{"size":38,"color":"#173B57"}},
-                    title={"text":gauge_label,"font":{"size":18,"color":gauge_color}},
-                    gauge={"axis":{"range":[0,100],"ticksuffix":"%"},
-                           "bar":{"color":gauge_color},"bgcolor":"white",
-                           "steps":[{"range":[0,75],"color":"#FBE9E7"},{"range":[75,90],"color":"#FFF4D6"},{"range":[90,100],"color":"#E5F4EC"}],
-                           "threshold":{"line":{"color":"#173B57","width":3},"thickness":0.8,"value":90}}))
-                gauge.update_layout(height=280, margin=dict(l=25,r=25,t=55,b=15))
-                st.plotly_chart(gauge, use_container_width=True, key="executive_gauge")
-            with donut_col:
-                st.markdown("#### Distribución de estados")
-                state_counts = pd.DataFrame({"Estado":["Vigentes","Vencidos","Próximos","Vencen hoy","Sin fecha válida"],
-                    "Cantidad":[compliant,expired,soon,due_today,no_date]})
-                state_counts = state_counts[state_counts["Cantidad"] > 0]
-                if state_counts.empty:
-                    st.info("No hay estados disponibles.")
-                else:
-                    donut = px.pie(state_counts, names="Estado", values="Cantidad", hole=0.60,
-                        color="Estado", color_discrete_map={"Vigentes":"#27855D","Vencidos":"#B42318","Próximos":"#E8BC48","Vencen hoy":"#E87924","Sin fecha válida":"#8394A4"})
-                    donut.update_traces(textposition="inside", textinfo="percent+label", hole=0.60)
-                    donut.update_layout(height=280, margin=dict(l=10,r=10,t=10,b=10), showlegend=False)
-                    st.plotly_chart(donut, use_container_width=True, key="executive_donut")
-
+            # El panel prioriza riesgos operativos; se omiten gauge y dona.
             dash = dash.copy()
             dash["_dias"] = pd.to_numeric(dash["Dias_restantes"], errors="coerce")
             dash["Tipo_control"] = dash["Tipo_control"].fillna("").astype(str).str.strip().replace({"":"Sin tipo","nan":"Sin tipo","None":"Sin tipo"})
             project_summary = project_expiry_summary(dash, threshold)
-            st.markdown("### Ranking de proyectos críticos")
+            st.markdown("### 🚨 Proyectos con mayor riesgo")
             critical = project_summary.sort_values(["Vencidos","Próximos a vencer","Vencen hoy"], ascending=False).head(10).copy()
             if not critical.empty:
                 critical_chart = px.bar(critical.sort_values("Vencidos", ascending=True), x="Vencidos", y="Proyecto", orientation="h",
-                    text="Vencidos", color="Vencidos", color_continuous_scale=[[0,"#E8BC48"],[1,"#B42318"]])
-                critical_chart.update_layout(height=max(300, 35*len(critical)+100), xaxis_title="Documentos vencidos", yaxis_title="", coloraxis_showscale=False)
+                    text="Vencidos", color="Vencidos", color_continuous_scale="Reds", title="Top proyectos con documentos vencidos")
+                critical_chart.update_layout(height=500, xaxis_title="Documentos vencidos", yaxis_title="", coloraxis_showscale=False)
                 st.plotly_chart(critical_chart, use_container_width=True, key="critical_projects_chart")
                 st.dataframe(critical[["Proyecto","Total documentos","Vencidos","Vencen hoy","Próximos a vencer","% cumplimiento"]], use_container_width=True, hide_index=True)
 
-            st.markdown("### Riesgo SST · proyecto vs. tipo de documento")
+            st.markdown("### 🔥 Riesgo por proyecto y categoría")
             heat = dash.copy()
             heat["Nivel"] = 0
             heat.loc[(heat["_dias"] >= 0) & (heat["_dias"] <= threshold), "Nivel"] = 1
             heat.loc[heat["_dias"] < 0, "Nivel"] = 2
             heat.loc[heat["_dias"].isna(), "Nivel"] = 3
-            matrix = heat.pivot_table(index="Proyecto", columns="Tipo_control", values="Nivel", aggfunc="max")
+            matrix = heat.pivot_table(index="Proyecto", columns="Categoria", values="Nivel", aggfunc="max")
             ordered_projects = project_summary.sort_values(["Vencidos","Próximos a vencer","Vencen hoy"], ascending=False)["Proyecto"].head(20).tolist()
             matrix = matrix.reindex([name for name in ordered_projects if name in matrix.index])
             if not matrix.empty:
                 heatmap = go.Figure(go.Heatmap(z=matrix.fillna(4).values, x=matrix.columns.tolist(), y=matrix.index.tolist(), zmin=0, zmax=4,
                     colorscale=[[0,"#27855D"],[0.24,"#27855D"],[0.25,"#E8BC48"],[0.49,"#E8BC48"],[0.5,"#B42318"],[0.74,"#B42318"],[0.75,"#8394A4"],[1,"#D9DEE5"]],
                     colorbar=dict(tickvals=[0,1,2,3,4],ticktext=["Vigente","Alerta","Vencido","Sin fecha","Sin documento"]),
-                    hovertemplate="Proyecto: %{y}<br>Tipo: %{x}<br>Nivel: %{z}<extra></extra>"))
-                heatmap.update_layout(height=max(330,min(800,36*len(matrix)+130)), margin=dict(l=15,r=15,t=20,b=80), xaxis_title="Tipo de documento", yaxis_title="Proyecto")
+                    hovertemplate="Proyecto: %{y}<br>Categoría: %{x}<br>Nivel: %{z}<extra></extra>"))
+                heatmap.update_layout(height=max(330,min(800,36*len(matrix)+130)), margin=dict(l=15,r=15,t=20,b=80), xaxis_title="Categoría", yaxis_title="Proyecto")
                 st.plotly_chart(heatmap, use_container_width=True, key="project_type_heatmap")
             st.caption("Semáforo: verde = vigente; amarillo = próximo a vencer; rojo = vencido; gris = sin fecha o sin documento registrado.")
 
