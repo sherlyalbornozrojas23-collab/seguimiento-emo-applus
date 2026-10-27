@@ -21,6 +21,32 @@ st.set_page_config(
     layout="wide"
 )
 
+st.markdown("""
+<style>
+:root { --applus-blue: #0757a5; --applus-navy: #12304a; --applus-cyan: #21a6d7; }
+[data-testid="stAppViewContainer"] { background: linear-gradient(180deg, #f5f9fd 0%, #ffffff 260px); }
+[data-testid="stHeader"] { background: rgba(255,255,255,.82); }
+.block-container { max-width: 1500px; padding-top: 1.5rem; padding-bottom: 2.5rem; }
+h1 { color: #12304a !important; letter-spacing: -.035em; font-weight: 780 !important; }
+h2, h3 { color: #173c5c !important; letter-spacing: -.02em; }
+[data-testid="stCaptionContainer"] { color: #64748b; }
+[data-testid="stTabs"] [role="tablist"] { gap: .45rem; border-bottom: 1px solid #dbe5ef; }
+[data-testid="stTabs"] button[role="tab"] { border-radius: 12px 12px 0 0; padding: .8rem 1rem; font-weight: 650; }
+[data-testid="stTabs"] button[aria-selected="true"] { background: #e8f3fc; color: #0757a5; border-bottom: 3px solid #0757a5; }
+[data-testid="stMetric"] { background: white; border: 1px solid #e0eaf3; border-radius: 16px; padding: 1rem 1.1rem; box-shadow: 0 4px 18px rgba(21, 55, 87, .055); }
+[data-testid="stMetricLabel"] { color: #5b7185; font-weight: 650; }
+[data-testid="stMetricValue"] { color: #12304a; font-weight: 780; }
+[data-testid="stExpander"] { border: 1px solid #dce7f1; border-radius: 12px; background: rgba(255,255,255,.9); }
+[data-testid="stDataFrame"] { border: 1px solid #e0eaf3; border-radius: 12px; overflow: hidden; }
+.stButton > button, .stDownloadButton > button { border-radius: 10px; font-weight: 650; border: 1px solid #c9dbea; transition: all .15s ease; }
+.stButton > button[kind="primary"] { background: #0757a5; border-color: #0757a5; }
+.stButton > button:hover, .stDownloadButton > button:hover { border-color: #0757a5; color: #0757a5; transform: translateY(-1px); box-shadow: 0 5px 14px rgba(7,87,165,.10); }
+[data-testid="stSidebar"] { background: #f0f6fb; border-right: 1px solid #e0eaf3; }
+[data-testid="stFileUploader"] { border-radius: 14px; }
+@media (max-width: 768px) { .block-container { padding: 1rem .8rem 2rem; } h1 { font-size: 1.8rem !important; } }
+</style>
+""", unsafe_allow_html=True)
+
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 ORIGINALS_DIR = DATA_DIR / "originales"
@@ -139,7 +165,7 @@ def safe_json_value(value):
     return str(value).strip()
 
 def parse_dates(series):
-    """Parse dates from Excel/CSV robustly, prioritizing DD/MM/YYYY."""
+    """Parsea fechas de Excel/CSV priorizando el formato peruano DD/MM/AAAA."""
     def parse_one(value):
         if value is None:
             return None
@@ -148,43 +174,34 @@ def parse_dates(series):
                 return None
         except (TypeError, ValueError):
             pass
-
-        if isinstance(value, (pd.Timestamp, datetime, date)):
-            return value.date() if isinstance(value, (pd.Timestamp, datetime)) else value
-
-        # Excel may store dates as serial numbers (days since 1899-12-30).
+        if isinstance(value, pd.Timestamp):
+            return value.date() if not pd.isna(value) else None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             number = float(value)
             if 20000 <= number <= 80000:
                 try:
                     return (pd.Timestamp("1899-12-30") + pd.to_timedelta(number, unit="D")).date()
-                except (TypeError, ValueError, OverflowError):
+                except Exception:
                     return None
-
         text = str(value).strip()
         if not text or text.lower() in {"nan", "nat", "none", "null", "-", "n/a"}:
             return None
-
-        # Explicit formats avoid ambiguous day/month parsing errors.
-        formats = (
-            "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y",
-            "%Y-%m-%d", "%Y/%m/%d", "%d.%m.%Y", "%d.%m.%y",
-            "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S",
-        )
-        for fmt in formats:
+        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y",
+                    "%Y-%m-%d", "%Y/%m/%d", "%d.%m.%Y", "%d.%m.%y",
+                    "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
             try:
                 return datetime.strptime(text, fmt).date()
             except (ValueError, TypeError):
                 continue
-
         try:
             parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
-            if not pd.isna(parsed):
-                return parsed.date()
-        except (TypeError, ValueError, OverflowError):
-            pass
-        return None
-
+            return None if pd.isna(parsed) else parsed.date()
+        except Exception:
+            return None
     return series.apply(parse_one)
 
 def db_connect():
@@ -312,8 +329,9 @@ def options_for(df, column, include_all=True):
     values = sorted([str(x) for x in df[column].dropna().unique() if str(x).strip()])
     return (["Todos"] + values) if include_all else values
 
-st.title("📅 Sistema corporativo de seguimiento de vencimientos")
-st.caption("Plataforma para consolidar vencimientos de distintas bases Excel, sin exigir una plantilla única ni modificar los archivos originales.")
+st.title("Control de vencimientos | Applus+")
+st.caption("Centro de seguimiento administrativo · Consolidación de Excel/CSV, alertas visuales y reportes filtrables.")
+st.markdown("<div style='height:4px;width:100%;background:linear-gradient(90deg,#0757a5,#21a6d7,transparent);border-radius:99px;margin:.4rem 0 1.2rem'></div>", unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("Configuración")
@@ -330,8 +348,9 @@ tab_dashboard, tab_upload, tab_sources, tab_records, tab_export = st.tabs([
 ])
 
 with tab_upload:
-    st.subheader("Cargar una o varias bases de datos")
-    st.write("Puedes seleccionar varios archivos Excel o CSV. Se leerán todas las hojas; cada hoja se puede mapear a sus propias columnas.")
+    st.subheader("Carga inteligente de bases")
+    st.write("Importa uno o varios archivos Excel/CSV. Revisa la vista previa, confirma las columnas y luego importa cada hoja.")
+    st.info("Flujo recomendado: 1) selecciona el archivo · 2) verifica la fecha de vencimiento · 3) confirma proyecto y responsable · 4) importa la hoja.")
     uploads = st.file_uploader(
         "Selecciona archivos .xlsx, .xlsm o .csv",
         type=["xlsx", "xlsm", "csv"],
@@ -551,7 +570,7 @@ def build_filtered_excel(detail, summary, today):
 with tab_dashboard:
     st.subheader("Vencimientos por proyecto")
     if all_records.empty:
-        st.info("Aún no hay registros consolidados. Entra en «Cargar Excel» para importar la primera base.")
+        st.info("Aún no hay registros consolidados. Abre la pestaña «Cargar Excel» para importar tu primera base y activar los indicadores, filtros y reportes.")
     else:
         threshold = max(warning_days or [30])
         st.caption(f"Próximos a vencer: documentos que vencen dentro de los próximos {threshold} días. Los porcentajes se calculan sobre el total de registros de cada proyecto.")
