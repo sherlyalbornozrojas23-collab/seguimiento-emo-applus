@@ -140,29 +140,45 @@ def safe_json_value(value):
     return str(value).strip()
 
 def parse_dates(series):
-    """Parse dates from Excel serials, datetime cells and common text formats."""
-    if pd.api.types.is_datetime64_any_dtype(series):
-        return pd.to_datetime(series, errors="coerce").dt.date
+    """Parse fechas de Excel de forma robusta, priorizando DD/MM/AAAA."""
     def one(value):
-        if value is None or pd.isna(value) or str(value).strip() == "":
+        if value is None:
             return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
         if isinstance(value, (pd.Timestamp, datetime, date)):
             return value.date() if isinstance(value, (pd.Timestamp, datetime)) else value
-        # Excel serial dates occasionally arrive as numbers.
-        if isinstance(value, (int, float)) and 20000 <= float(value) <= 80000:
-            try:
-                return (pd.Timestamp("1899-12-30") + pd.to_timedelta(float(value), unit="D")).date()
-            except Exception:
-                return None
+        # Fechas seriales de Excel (por ejemplo, 46300).
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+            if 20000 <= number <= 80000:
+                try:
+                    return (pd.Timestamp("1899-12-30") + pd.to_timedelta(number, unit="D")).date()
+                except Exception:
+                    return None
         text = str(value).strip()
-        for dayfirst in (True, False):
+        if not text or text.lower() in {"nan", "nat", "none", "null", "-", "n/a"}:
+            return None
+        # Interpretación explícita de formatos habituales para evitar ambigüedad.
+        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y",
+                    "%Y-%m-%d", "%Y/%m/%d", "%d.%m.%Y", "%d.%m.%y",
+                    "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
             try:
-                parsed = pd.to_datetime(text, errors="raise", dayfirst=dayfirst)
-                if not pd.isna(parsed):
-                    return parsed.date()
-            except Exception:
-                pass
+                return datetime.strptime(text, fmt).date()
+            except (ValueError, TypeError):
+                continue
+        # Fallback para valores que incluyen hora u otros formatos reconocibles.
+        try:
+            parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+            if not pd.isna(parsed):
+                return parsed.date()
+        except Exception:
+            pass
         return None
+
     return series.apply(one)
 
 def db_connect():
