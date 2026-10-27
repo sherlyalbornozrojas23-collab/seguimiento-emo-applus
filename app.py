@@ -345,6 +345,48 @@ with st.sidebar:
     st.divider()
     st.caption("La base consolidada se guarda en la carpeta `data`. En alojamientos con disco efímero, configura almacenamiento persistente antes del uso compartido real.")
 
+# Cargar y preparar la base consolidada para el panel y los reportes.
+# Esta lectura sustituye las antiguas pestañas de carga/archivos/registros;
+# no añade esas secciones a la interfaz.
+try:
+    db_records = load_records()
+except Exception as exc:
+    st.error("No se pudo leer la base de datos de vencimientos.")
+    st.caption(f"Detalle técnico: {type(exc).__name__}")
+    db_records = pd.DataFrame()
+
+try:
+    all_sources = load_sources()
+except Exception as exc:
+    st.warning("No se pudo leer el historial de archivos de origen; el panel y los reportes seguirán disponibles.")
+    st.caption(f"Detalle técnico del historial: {type(exc).__name__}")
+    all_sources = pd.DataFrame(columns=["source_key", "source_file", "source_hash", "uploaded_by", "sheets", "imported_at"])
+
+if db_records.empty:
+    all_records = pd.DataFrame(columns=[
+        "Categoria", "Proyecto", "Tipo_control", "Persona_activo", "Identificador",
+        "Fecha_emision", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento",
+        "Responsable", "Correo"
+    ])
+else:
+    all_records = pd.DataFrame({
+        "Categoria": db_records.get("category", pd.Series(index=db_records.index, dtype=object)).fillna("Otro").astype(str),
+        "Proyecto": db_records.get("project", pd.Series(index=db_records.index, dtype=object)).apply(clean_project_name),
+        "Tipo_control": db_records.get("document_type", pd.Series(index=db_records.index, dtype=object)).fillna("Sin tipo").astype(str),
+        "Persona_activo": db_records.get("person_asset", pd.Series(index=db_records.index, dtype=object)).fillna("").astype(str),
+        "Identificador": db_records.get("identifier", pd.Series(index=db_records.index, dtype=object)).fillna("").astype(str),
+        "Fecha_emision": pd.to_datetime(db_records.get("issue_date", pd.Series(index=db_records.index, dtype=object)), errors="coerce").dt.date,
+        "Fecha_vencimiento": pd.to_datetime(db_records.get("due_date", pd.Series(index=db_records.index, dtype=object)), errors="coerce").dt.date,
+        "Responsable": db_records.get("responsible", pd.Series(index=db_records.index, dtype=object)).fillna("").astype(str),
+        "Correo": db_records.get("email", pd.Series(index=db_records.index, dtype=object)).fillna("").astype(str),
+    })
+    all_records["Dias_restantes"] = all_records["Fecha_vencimiento"].apply(
+        lambda value: (value - today).days if isinstance(value, date) else None
+    )
+    all_records["Estado_seguimiento"] = all_records["Fecha_vencimiento"].apply(
+        lambda value: calc_status(value, today, warning_days)
+    )
+
 tab_dashboard, tab_export = st.tabs(["📊 Panel general", "📤 Reportes"])
 
 def project_expiry_summary(frame, threshold):
