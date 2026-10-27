@@ -299,9 +299,10 @@ def import_sheet(
     if not records:
         raise ValueError("La hoja seleccionada no contiene registros válidos. Se conservó la base anterior.")
     with db_connect() as conn:
-        # Una sola transacción: si falla cualquier INSERT, SQLite revierte los DELETE.
-        conn.execute("DELETE FROM records")
-        conn.execute("DELETE FROM sources")
+        # Consolidar múltiples archivos: reemplazar únicamente esta hoja/fuente.
+        # La transacción revierte los cambios si falla cualquier INSERT.
+        conn.execute("DELETE FROM records WHERE source_key = ?", (source_key,))
+        conn.execute("DELETE FROM sources WHERE source_key = ?", (source_key,))
         conn.executemany("""
             INSERT INTO records (
                 source_key, source_file, source_sheet, source_row, source_hash,
@@ -317,13 +318,15 @@ def import_sheet(
         # Verificar el reemplazo dentro de la misma transacción.
         active_count = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
         source_count = conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
-        if active_count != len(records) or source_count != 1:
+        expected_active = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+        expected_sources = conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
+        if expected_active < len(records) or expected_sources < 1:
             raise RuntimeError(
-                f"Reemplazo inconsistente: {active_count} registros, "
-                f"{source_count} fuentes; se conservará la base anterior."
+                f"Importación inconsistente: {expected_active} registros activos, "
+                f"{expected_sources} fuentes. Se revertirá la operación."
             )
         conn.commit()
-    return active_count
+    return len(records)
 
 def due_or_date(value):
     return value is not None and not pd.isna(value)
@@ -445,6 +448,13 @@ with st.expander("🔎 Diagnóstico de datos (abrir si los gráficos aparecen va
                 use_container_width=True, hide_index=True
             )
     if not all_records.empty:
+        st.write("Distribución de tipos específicos importados:")
+        if "Tipo_control" in all_records.columns:
+            st.dataframe(
+                all_records["Tipo_control"].fillna("Sin tipo").astype(str).replace("", "Sin tipo")
+                .value_counts(dropna=False).head(50).rename_axis("Tipo de documento").reset_index(name="Cantidad"),
+                use_container_width=True, hide_index=True
+            )
         st.write("Muestra de fechas y estados calculados:")
         st.dataframe(
             all_records[[c for c in ["Proyecto", "Fecha_vencimiento", "Dias_restantes", "Estado_seguimiento"] if c in all_records.columns]].head(20),
@@ -624,8 +634,8 @@ with tab_dashboard:
                             if not original_path.exists():
                                 with open(original_path, "wb") as original_file:
                                     original_file.write(file_bytes)
-                            # La nueva importación reemplaza TODA la base activa, incluso si
-                            # el archivo coincide con uno importado anteriormente.
+                            # Se consolida con otras fuentes; si esta misma hoja ya existía,
+                            # se reemplaza solo esa fuente para evitar duplicar sus registros.
                             try:
                                 count = import_sheet(saved_name, sheet_name, upload_df, file_hash, "Usuario de la aplicación", up_category, mapped(up_due), mapped(up_issue), mapped(up_project), mapped(up_person), mapped(up_identifier), mapped(up_responsible), mapped(up_email), mapped(up_type), mapped(up_status))
                             except Exception as import_exc:
@@ -674,10 +684,12 @@ with tab_dashboard:
             k4.metric("📅 Vencen hoy", due_today_total)
             st.caption(f"Vigentes fuera de alerta: {int((valid_days > threshold).sum())} · Sin fecha válida: {int(valid_days.isna().sum())}")
 
-            by_type = dash.groupby("Categoria", dropna=False).size().reset_index(name="Cantidad")
-            by_type["Categoria"] = by_type["Categoria"].fillna("Otro")
-            st.markdown("#### Documentos por tipo")
-            fig_all = px.bar(by_type.sort_values("Cantidad", ascending=False), x="Categoria", y="Cantidad",
+            dash["Tipo_control"] = dash["Tipo_control"].fillna("").astype(str).str.strip()
+            dash.loc[dash["Tipo_control"].isin(["", "None", "nan", "NaN"]), "Tipo_control"] = "Sin tipo"
+            by_type = (dash.groupby("Tipo_control", dropna=False).size()
+                       .reset_index(name="Cantidad"))
+            st.markdown("#### Documentos por tipo específico")
+            fig_all = px.bar(by_type.sort_values("Cantidad", ascending=False), x="Tipo_control", y="Cantidad",
                              text="Cantidad", color_discrete_sequence=["#245B7A"])
             fig_all.update_layout(height=350, xaxis_title="", yaxis_title="Documentos")
             st.plotly_chart(fig_all, use_container_width=True, key="count_by_category")
@@ -689,12 +701,13 @@ with tab_dashboard:
             ]:
                 with target:
                     st.markdown(f"#### {title}")
-                    counts = dash.loc[mask].groupby("Categoria", dropna=False).size().reset_index(name="Cantidad")
+                    counts = (dash.loc[mask].groupby("Tipo_control", dropna=False)
+                              .size().reset_index(name="Cantidad"))
                     if counts.empty:
                         st.info("Sin documentos en esta condición.")
                     else:
-                        counts["Categoria"] = counts["Categoria"].fillna("Otro")
-                        fig = px.bar(counts.sort_values("Cantidad"), x="Cantidad", y="Categoria",
+                        counts["Tipo_control"] = counts["Tipo_control"].fillna("Sin tipo")
+                        fig = px.bar(counts.sort_values("Cantidad"), x="Cantidad", y="Tipo_control",
                                      orientation="h", text="Cantidad", color_discrete_sequence=[color])
                         fig.update_layout(height=350, xaxis_title="Documentos", yaxis_title="")
                         st.plotly_chart(fig, use_container_width=True, key=chart_key)
@@ -715,12 +728,13 @@ with tab_dashboard:
             st.markdown("#### Mapa de calor: proyecto vs. documento")
             heat_data = dash.copy()
             heat_data["Proyecto"] = heat_data["Proyecto"].fillna("Proyecto sin identificar")
-            heat_data["Categoria"] = heat_data["Categoria"].fillna("Otro")
+            heat_data["Tipo_control"] = heat_data["Tipo_control"].fillna("Sin tipo").astype(str).str.strip()
+            heat_data.loc[heat_data["Tipo_control"].isin(["", "None", "nan", "NaN"]), "Tipo_control"] = "Sin tipo"
             heat_data["Nivel"] = 0  # 0 vigente, 1 alerta, 2 vencido, 3 fecha faltante
             heat_data.loc[(valid_days >= 0) & (valid_days <= threshold), "Nivel"] = 1
             heat_data.loc[valid_days < 0, "Nivel"] = 2
             heat_data.loc[valid_days.isna(), "Nivel"] = 3
-            matrix = heat_data.pivot_table(index="Proyecto", columns="Categoria", values="Nivel", aggfunc="max")
+            matrix = heat_data.pivot_table(index="Proyecto", columns="Tipo_control", values="Nivel", aggfunc="max")
             ordered = summary.sort_values(["Vencidos", "Próximos a vencer"], ascending=False)["Proyecto"].head(20)
             matrix = matrix.reindex([p for p in ordered if p in matrix.index])
             if not matrix.empty:
@@ -900,3 +914,4 @@ st.caption(
     "los permisos, el acceso a la aplicación, la retención de archivos y el almacenamiento. "
     "No cargues diagnósticos ni historias clínicas. Los archivos originales se guardan en data/originales."
 )
+
